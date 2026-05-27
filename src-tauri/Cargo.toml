@@ -1,0 +1,33 @@
+[package]
+name = "assistant-core"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0.2", features = [] }
+
+[dependencies]
+anyhow = "1.0.94"
+aes-gcm = "0.10.3"
+base64 = "0.22.1"
+chrono = { version = "0.4.38", features = ["serde"] }
+dirs = "5.0.1"
+futures = "0.3.31"
+gray_matter = "0.2.8"
+rand = "0.8.5"
+regex = "1.11.1"
+reqwest = { version = "0.12.9", features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "chrono"] }
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+sha2 = "0.10.8"
+tauri = { version = "2.1.1", features = [] }
+tauri-plugin-dialog = "2.0.1"
+tauri-plugin-shell = "2.0.1"
+thiserror = "2.0.6"
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "sync"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+url = "2.5.4"
+uuid = { version = "1.11.0", features = ["serde", "v4"] }
+

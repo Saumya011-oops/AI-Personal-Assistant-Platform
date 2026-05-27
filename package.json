@@ -1,0 +1,24 @@
+{
+  "name": "ai-personal-assistant-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @assistant/desktop",
+    "tauri:dev": "cd src-tauri && ../node_modules/.bin/tauri dev",
+    "tauri:build": "cd src-tauri && ../node_modules/.bin/tauri build",
+    "build": "npm run build --workspace @assistant/shared && npm run build --workspace @assistant/desktop",
+    "typecheck": "npm run typecheck --workspace @assistant/shared && npm run typecheck --workspace @assistant/desktop",
+    "lint": "npm run lint --workspace @assistant/shared && npm run lint --workspace @assistant/desktop",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3"
+  }
+}
