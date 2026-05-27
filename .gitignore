@@ -19,3 +19,5 @@ src-tauri/.env
 tmp
 *.db
 assistant.db
+T_AI_Personal_Assistant_MVP.pdf
+scratch/
