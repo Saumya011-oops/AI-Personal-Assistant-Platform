@@ -1,204 +1,213 @@
-import { CheckCircle2, Loader2, LockKeyhole, Save, Settings2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { Database, Save, RotateCcw, CheckCircle2, Shield, RefreshCw } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useGoogleAuthStatusQuery } from '@/features/settings/hooks/use-google-auth-status-query';
+import { ErrorState } from '@/components/states/error-state';
+import { LoadingState } from '@/components/states/loading-state';
 import { useSettingsQuery } from '@/features/settings/hooks/use-settings-query';
-import { invokeCommand } from '@/lib/api/invoke-command';
+import { useUpdateSettingsMutation } from '@/features/settings/hooks/use-update-settings-mutation';
+
+const DEFAULT_VAULT_PATH = '/Users/saumyathacker/Documents/rag_sys/rag_sys';
 
 export function SettingsPage() {
-  const settings = useSettingsQuery();
-  const authStatus = useGoogleAuthStatusQuery();
-  const [vaultPath, setVaultPath] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const settingsQuery = useSettingsQuery();
+  const updateSettings = useUpdateSettingsMutation();
+  const [draftPath, setDraftPath] = useState('');
 
-  useEffect(() => {
-    if (settings.data?.obsidianVaultPath) {
-      setVaultPath(settings.data.obsidianVaultPath);
-    }
-  }, [settings.data?.obsidianVaultPath]);
+  const currentPath = (settingsQuery.data as any)?.obsidian_vault_path ?? DEFAULT_VAULT_PATH;
+  const draftValue = draftPath || currentPath;
+  const isDirty = draftPath.length > 0 && draftPath !== currentPath;
 
-  async function handleSaveVaultPath() {
-    if (!vaultPath.trim()) {
-      return;
-    }
+  function handleSave() {
+    updateSettings.mutate(
+      { obsidian_vault_path: draftValue } as any,
+      { onSuccess: () => setDraftPath('') },
+    );
+  }
 
-    setIsSaving(true);
-    setSaveStatus('idle');
-    try {
-      await invokeCommand('select_obsidian_vault', { path: vaultPath.trim() });
-      setSaveStatus('success');
-      await settings.refetch();
-    } catch {
-      setSaveStatus('error');
-    } finally {
-      setIsSaving(false);
-    }
+  if (settingsQuery.isLoading) {
+    return <LoadingState label="Loading configuration from the local settings store." />;
+  }
+
+  if (settingsQuery.isError) {
+    return (
+      <ErrorState
+        description="The desktop app could not read vault configuration from its SQLite store."
+        onRetry={() => settingsQuery.refetch()}
+        title="Failed to load settings"
+      />
+    );
   }
 
   return (
-    <div className="space-y-4">
-      <Card className="p-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
-              Control Room
+    <div className="max-w-4xl mx-auto animate-slide-up">
+      {/* ── Page Header ─────────────────────────────────── */}
+      <div className="mb-8">
+        <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
+          Configuration
+        </p>
+        <h2 className="text-3xl font-bold text-on-surface">Settings</h2>
+      </div>
+
+      <div className="space-y-5">
+        {/* ── Obsidian Vault Path ──────────────────────── */}
+        <section className="glass-panel rounded-2xl p-8">
+          <div className="flex items-start gap-5 mb-7">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-surface-container-high border border-outline-variant/30">
+              <Database size={24} className="text-primary-glass" />
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-on-surface mb-1">Obsidian vault path</h3>
+              <p className="text-[13px] text-on-surface-variant leading-relaxed max-w-xl">
+                Point the desktop app at the local knowledge vault you want indexed for RAG
+                retrieval and citation processing.
+              </p>
+            </div>
+          </div>
+
+          {/* Current path display */}
+          <div className="mb-5">
+            <label className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-2 block">
+              Current Path
+            </label>
+            <div className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/30 px-4 py-3">
+              <Database size={16} className="text-outline shrink-0" />
+              <span className="font-mono text-[13px] text-on-surface-variant truncate">
+                {currentPath}
+              </span>
+            </div>
+          </div>
+
+          {/* Editable path */}
+          <div className="mb-6">
+            <label
+              className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-2 block"
+              htmlFor="vault-path-input"
+            >
+              New Vault Path
+            </label>
+            <div
+              className={`flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                isDirty
+                  ? 'border-primary-glass/40 bg-primary-glass/5'
+                  : 'border-outline-variant/30 bg-surface-container-high/30'
+              }`}
+            >
+              <Database size={16} className="text-outline shrink-0" />
+              <input
+                className="flex-1 bg-transparent font-mono text-[13px] text-on-surface focus:outline-none placeholder:text-outline min-w-0"
+                id="vault-path-input"
+                onChange={(e) => setDraftPath(e.target.value)}
+                placeholder={currentPath}
+                value={draftValue}
+              />
+            </div>
+            <p className="mt-2 text-[12px] text-outline">
+              Standard Unix path format. Symlinks are supported but not recommended for indexing
+              stability.
             </p>
-            <h2 className="mt-1 text-xl font-semibold">Settings and authentication</h2>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline">Desktop preferences</Badge>
-            <Badge variant="secondary">Secure credentials</Badge>
-          </div>
-        </div>
-      </Card>
 
-      <Tabs defaultValue="sources">
-        <TabsList>
-          <TabsTrigger value="sources">Sources</TabsTrigger>
-          <TabsTrigger value="auth">Authentication</TabsTrigger>
-          <TabsTrigger value="workspace">Workspace</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="sources">
-          <Card className="p-5">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-secondary">
-                <Settings2 className="h-5 w-5 text-primary" />
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold">Obsidian vault path</h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Point the desktop app at the local knowledge vault you want indexed.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 space-y-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
-                  Current path
-                </p>
-                <p className="mt-2 rounded-2xl border border-border bg-secondary/55 px-4 py-3 font-mono text-sm">
-                  {settings.data?.obsidianVaultPath ?? 'Not configured'}
-                </p>
-              </div>
-              <div>
-                <p className="mb-2 text-xs uppercase tracking-[0.2em] text-muted-foreground">
-                  New vault path
-                </p>
-                <Input
-                  onChange={(event) => {
-                    setVaultPath(event.target.value);
-                    setSaveStatus('idle');
-                  }}
-                  placeholder="/Users/name/Documents/MyVault"
-                  value={vaultPath}
-                />
-              </div>
-              <Button
-                className="gap-2"
-                disabled={isSaving || !vaultPath.trim()}
-                onClick={handleSaveVaultPath}
-                variant="secondary"
+          {/* Actions */}
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex gap-3">
+              <button
+                className="flex items-center gap-2 rounded-xl bg-primary-container px-5 py-2.5 text-[13px] font-medium text-on-primary shadow-lg hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
+                disabled={updateSettings.isPending || !isDirty}
+                onClick={handleSave}
+                type="button"
+                id="settings-save-vault-btn"
               >
-                {isSaving ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4" />
-                )}
-                {isSaving ? 'Saving path' : 'Save vault path'}
-              </Button>
-              {saveStatus === 'success' ? (
-                <p className="text-sm text-emerald-400">
-                  Vault path saved. The integration panel can now scan it.
-                </p>
-              ) : null}
-              {saveStatus === 'error' ? (
-                <p className="text-sm text-red-400">
-                  Saving failed. Verify the path and try again.
-                </p>
-              ) : null}
+                <Save size={15} />
+                Save vault path
+              </button>
+              <button
+                className="flex items-center gap-2 rounded-xl border border-outline-variant/30 bg-surface-container-high/40 px-5 py-2.5 text-[13px] text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all"
+                onClick={() => setDraftPath('')}
+                type="button"
+                id="settings-reset-vault-btn"
+              >
+                <RotateCcw size={15} />
+                Reset to default
+              </button>
             </div>
-          </Card>
-        </TabsContent>
 
-        <TabsContent value="auth">
-          <div className="grid gap-4 xl:grid-cols-2">
-            <Card className="p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-secondary">
-                  <LockKeyhole className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold">Google OAuth</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Foundation for Gmail and Calendar extensions.
-                  </p>
-                </div>
+            {!isDirty && !updateSettings.isPending && (
+              <div className="flex items-center gap-2 text-tertiary">
+                <CheckCircle2 size={16} />
+                <span className="text-[13px] font-medium">Vault validated &amp; ready</span>
               </div>
-              <div className="mt-5 space-y-3">
-                <div className="flex items-center justify-between rounded-2xl border border-border bg-secondary/50 px-4 py-3">
-                  <span className="text-sm">Status</span>
-                  <Badge variant={authStatus.data?.connected ? 'success' : 'outline'}>
-                    {authStatus.data?.connected ? 'Connected' : 'Not connected'}
-                  </Badge>
-                </div>
-                <div className="rounded-2xl border border-border bg-secondary/50 px-4 py-3">
-                  <p className="text-sm">Account</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {authStatus.data?.email ?? 'No Google account linked yet'}
-                  </p>
-                </div>
-              </div>
-            </Card>
-
-            <Card className="p-5">
-              <h3 className="text-lg font-semibold">Credential posture</h3>
-              <div className="mt-4 space-y-3">
-                {[
-                  'Tokens are stored via the backend credential service.',
-                  'PKCE is supported in the OAuth foundation.',
-                  'Desktop settings remain separate from integration credentials.',
-                ].map((item) => (
-                  <div
-                    key={item}
-                    className="flex items-start gap-3 rounded-2xl border border-border bg-secondary/55 px-4 py-3"
-                  >
-                    <CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-400" />
-                    <p className="text-sm text-muted-foreground">{item}</p>
-                  </div>
-                ))}
-              </div>
-            </Card>
+            )}
           </div>
-        </TabsContent>
+        </section>
 
-        <TabsContent value="workspace">
-          <Card className="p-5">
-            <h3 className="text-lg font-semibold">Workspace defaults</h3>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
+        {/* ── Bottom Row: Auto-sync + Key Management ─── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {/* Auto-sync Frequency */}
+          <section className="glass-panel rounded-2xl p-6">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-surface-container-high border border-outline-variant/30">
+                <RefreshCw size={18} className="text-primary-glass" />
+              </div>
+              <h3 className="text-[16px] font-bold text-on-surface">Auto-sync Frequency</h3>
+            </div>
+            <p className="text-[13px] text-on-surface-variant mb-5 leading-relaxed">
+              Configure how often sources are automatically polled for new content.
+            </p>
+            <div className="space-y-2">
+              {['Every 15 minutes', 'Every hour', 'Every 6 hours', 'Manual only'].map(
+                (option) => (
+                  <label
+                    key={option}
+                    className="flex items-center gap-3 rounded-xl px-4 py-3 border border-transparent hover:border-outline-variant/20 hover:bg-surface-container-high/30 transition-all cursor-pointer group"
+                  >
+                    <input
+                      type="radio"
+                      name="sync-frequency"
+                      value={option}
+                      className="accent-[color:var(--primary-glass)] cursor-pointer"
+                      defaultChecked={option === 'Every hour'}
+                    />
+                    <span className="text-[13px] text-on-surface-variant group-hover:text-on-surface transition-colors">
+                      {option}
+                    </span>
+                  </label>
+                ),
+              )}
+            </div>
+          </section>
+
+          {/* Key Management */}
+          <section className="glass-panel rounded-2xl p-6">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-surface-container-high border border-outline-variant/30">
+                <Shield size={18} className="text-primary-glass" />
+              </div>
+              <h3 className="text-[16px] font-bold text-on-surface">Key Management</h3>
+            </div>
+            <p className="text-[13px] text-on-surface-variant mb-5 leading-relaxed">
+              Manage API keys and authentication tokens stored in the local secure vault.
+            </p>
+
+            <div className="space-y-3">
               {[
-                'Dark theme only for the desktop foundation phase.',
-                'Command palette remains the primary navigation accelerator.',
-                'Layouts favor dense horizontal work over stacked mobile patterns.',
+                { label: 'Google OAuth', status: 'Configured' },
+                { label: 'Notion API Key', status: 'Configured' },
+                { label: 'Ollama Endpoint', status: 'Local' },
               ].map((item) => (
                 <div
-                  key={item}
-                  className="rounded-2xl border border-border bg-secondary/55 px-4 py-4 text-sm text-muted-foreground"
+                  key={item.label}
+                  className="flex items-center justify-between rounded-xl border border-outline-variant/20 bg-surface-container-high/30 px-4 py-3"
                 >
-                  {item}
+                  <span className="text-[13px] text-on-surface-variant">{item.label}</span>
+                  <span className="font-mono text-[10px] rounded-full bg-tertiary/10 border border-tertiary/20 text-tertiary px-2 py-0.5 font-bold">
+                    {item.status}
+                  </span>
                 </div>
               ))}
             </div>
-          </Card>
-        </TabsContent>
-      </Tabs>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

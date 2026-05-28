@@ -2,56 +2,223 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Google Fonts: loaded via <link> in index.html for Tauri/Vite compatibility ── */
+
+/* ── CSS Custom Properties ───────────────────────────── */
 :root {
   color-scheme: dark;
+
+  /* Core shadcn-compatible tokens (kept for UI component compatibility) */
   --background: 222 31% 7%;
-  --foreground: 214 24% 92%;
-  --card: 222 24% 10%;
-  --card-foreground: 214 24% 92%;
-  --popover: 224 26% 9%;
-  --popover-foreground: 214 24% 92%;
-  --primary: 205 84% 63%;
+  --foreground: 228 90% 93%;
+  --card: 224 30% 11%;
+  --card-foreground: 228 90% 93%;
+  --popover: 224 32% 9%;
+  --popover-foreground: 228 90% 93%;
+  --primary: 200 100% 78%;
   --primary-foreground: 222 42% 8%;
-  --secondary: 223 17% 16%;
-  --secondary-foreground: 214 18% 88%;
-  --muted: 223 16% 14%;
-  --muted-foreground: 215 14% 62%;
-  --accent: 223 20% 17%;
-  --accent-foreground: 213 24% 92%;
+  --secondary: 224 22% 17%;
+  --secondary-foreground: 228 80% 88%;
+  --muted: 224 20% 15%;
+  --muted-foreground: 220 16% 62%;
+  --accent: 224 22% 19%;
+  --accent-foreground: 228 80% 92%;
   --destructive: 0 72% 51%;
   --destructive-foreground: 210 40% 98%;
-  --border: 221 18% 20%;
-  --input: 221 18% 20%;
-  --ring: 205 84% 63%;
+  --border: 222 20% 20%;
+  --input: 222 20% 20%;
+  --ring: 200 100% 78%;
   --radius: 1rem;
-  --sidebar-background: 222 28% 8%;
-  --sidebar-foreground: 214 22% 90%;
-  --sidebar-accent: 223 16% 14%;
-  --sidebar-accent-foreground: 214 22% 94%;
-  --sidebar-border: 222 18% 16%;
-  --sidebar-primary: 205 84% 63%;
+  --sidebar-background: 222 32% 7%;
+  --sidebar-foreground: 228 80% 90%;
+  --sidebar-accent: 224 20% 14%;
+  --sidebar-accent-foreground: 228 80% 94%;
+  --sidebar-border: 222 20% 16%;
+  --sidebar-primary: 200 100% 78%;
   --sidebar-primary-foreground: 222 42% 8%;
+
+  /* Glass design tokens */
+  --glass-bg: rgba(23, 31, 51, 0.45);
+  --glass-border: rgba(62, 72, 79, 0.32);
+  --glass-blur: 40px;
+  --color-primary-rgb: 142, 213, 255;
+  --color-tertiary-rgb: 69, 227, 206;
+}
+
+/* ── Base ─────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-width: 1180px;
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, rgba(73, 156, 255, 0.1), transparent 24%),
-    linear-gradient(180deg, #090c12 0%, #0d1118 100%);
-  font-family: "SF Pro Display", "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
-  color: hsl(var(--foreground));
-}
-
-* {
-  box-sizing: border-box;
+  font-family: 'Geist', 'SF Pro Display', ui-sans-serif, system-ui, sans-serif;
+  background-color: #0b1326;
+  background-image:
+    radial-gradient(circle at 20% 10%, rgba(142, 213, 255, 0.07) 0%, transparent 30%),
+    radial-gradient(circle at 80% 90%, rgba(69, 227, 206, 0.05) 0%, transparent 25%);
+  color: #dae2fd;
+  overflow: hidden;
 }
 
 #root {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 ::selection {
-  background: rgba(93, 164, 255, 0.24);
+  background: rgba(142, 213, 255, 0.22);
+}
+
+/* All icons are now Lucide React SVGs (bundled, offline-capable) */
+/* .material-symbols-outlined class removed — no longer used */
+
+/* ── Utility Classes ──────────────────────────────────── */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
+}
+
+.glass-panel-solid {
+  background: rgba(19, 27, 46, 0.8);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #2d3449 transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #2d3449;
+  border-radius: 10px;
+}
+
+.hover-lift {
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hover-lift:hover {
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.5),
+              0 0 20px 0 rgba(142, 213, 255, 0.08);
+}
+
+/* ── Keyframe Animations ──────────────────────────────── */
+@keyframes ai-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@keyframes pulse-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0; }
+  50% { opacity: 0.3; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+@keyframes sync-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes thinking-pulse {
+  0% { border-color: rgba(142, 213, 255, 0.1); box-shadow: 0 0 0 0 rgba(142, 213, 255, 0); }
+  50% { border-color: rgba(142, 213, 255, 0.4); box-shadow: 0 0 15px 2px rgba(142, 213, 255, 0.1); }
+  100% { border-color: rgba(142, 213, 255, 0.1); box-shadow: 0 0 0 0 rgba(142, 213, 255, 0); }
+}
+
+@keyframes pulse-ambient {
+  0%, 100% { transform: scale(1); opacity: 0.4; }
+  50% { transform: scale(1.2); opacity: 0.7; }
+}
+
+@keyframes slide-in-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Animation utility classes */
+.animate-ai-pulse {
+  animation: ai-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-thinking {
+  animation: thinking-pulse 2s infinite ease-in-out;
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, #38bdf8 25%, #7bd0ff 50%, #38bdf8 75%);
+  background-size: 200% 100%;
+  animation: sync-shimmer 2s linear infinite;
+}
+
+.animate-slide-up {
+  animation: slide-in-up 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hero-glow {
+  position: absolute;
+  inset: -20%;
+  background: radial-gradient(circle at 50% 50%, rgba(142, 213, 255, 0.07) 0%, transparent 60%);
+  animation: pulse-ambient 8s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.streaming-text::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background-color: #8ed5ff;
+  margin-left: 3px;
+  animation: pulse-cursor 0.8s infinite;
+  vertical-align: middle;
+  border-radius: 1px;
+}
+
+/* Tab active state */
+.tab-active {
+  color: #8ed5ff !important;
+  background: rgba(142, 213, 255, 0.1) !important;
+  border-bottom: 2px solid #8ed5ff !important;
+}
+
+/* Source badge colors */
+.badge-notion {
+  background: rgba(56, 189, 248, 0.12);
+  color: #8ed5ff;
+  border: 1px solid rgba(142, 213, 255, 0.25);
+}
+
+.badge-obsidian {
+  background: rgba(69, 227, 206, 0.1);
+  color: #45e3ce;
+  border: 1px solid rgba(69, 227, 206, 0.2);
 }

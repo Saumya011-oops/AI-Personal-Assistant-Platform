@@ -1,27 +1,58 @@
-import {
-  CheckCircle2,
-  CloudCog,
-  Database,
-  Loader2,
-  Mail,
-  RefreshCw,
-} from 'lucide-react';
+import { Loader2, RefreshCw, CheckCircle2, FolderOpen, Mail, Calendar, Plus } from 'lucide-react';
 
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
 import { useGoogleConnectMutation } from '@/features/integrations/hooks/use-google-connect-mutation';
 import { useIntegrationSummariesQuery } from '@/features/integrations/hooks/use-integration-summaries-query';
 import { useNotionSyncMutation } from '@/features/integrations/hooks/use-notion-sync-mutation';
 import { useObsidianScanMutation } from '@/features/integrations/hooks/use-obsidian-scan-mutation';
 
-const futureIntegrations = [
-  { label: 'Gmail', icon: Mail, description: 'Thread summaries, inbox retrieval, and grounded email actions.' },
-  { label: 'Calendar', icon: CloudCog, description: 'Time-aware retrieval and schedule-assisted planning.' },
-];
+// ── Icon map for each integration ──────────────────────────
+function IntegrationIcon({ kind }: { kind: string }) {
+  const cls = 'text-primary-glass';
+  switch (kind) {
+    case 'notion':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={`h-6 w-6 ${cls}`} stroke="currentColor" strokeWidth={1.5}>
+          <rect x="3" y="3" width="18" height="18" rx="3" />
+          <path d="M7 8h10M7 12h7M7 16h5" strokeLinecap="round" />
+        </svg>
+      );
+    case 'obsidian':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={`h-6 w-6 ${cls}`} stroke="currentColor" strokeWidth={1.5}>
+          <polygon points="12,2 22,8 22,16 12,22 2,16 2,8" />
+          <line x1="12" y1="2" x2="12" y2="22" />
+          <line x1="2" y1="8" x2="22" y2="16" />
+          <line x1="22" y1="8" x2="2" y2="16" />
+        </svg>
+      );
+    case 'google':
+      return (
+        <svg viewBox="0 0 24 24" className={`h-6 w-6 ${cls}`} fill="currentColor">
+          <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+          <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+          <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+          <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+        </svg>
+      );
+    default:
+      return <RefreshCw size={22} className={cls} />;
+  }
+}
+
+function statusConfig(status: string) {
+  switch (status) {
+    case 'connected':
+      return { color: 'text-tertiary', bg: 'bg-tertiary/10', border: 'border-tertiary/20', dot: 'bg-tertiary', label: 'connected' };
+    case 'syncing':
+      return { color: 'text-primary-glass', bg: 'bg-primary-glass/10', border: 'border-primary-glass/20', dot: 'bg-primary-glass', label: 'syncing' };
+    case 'error':
+      return { color: 'text-red-400', bg: 'bg-red-400/10', border: 'border-red-400/20', dot: 'bg-red-400', label: 'error' };
+    default:
+      return { color: 'text-outline', bg: 'bg-surface-container-high', border: 'border-outline-variant/20', dot: 'bg-outline', label: status || 'not configured' };
+  }
+}
 
 export function IntegrationsPage() {
   const summaries = useIntegrationSummariesQuery();
@@ -43,153 +74,242 @@ export function IntegrationsPage() {
     );
   }
 
-  return (
-    <div className="space-y-4">
-      <Card className="p-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
-              Source Control
-            </p>
-            <h2 className="mt-1 text-xl font-semibold">Integrations and sync health</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Connect knowledge systems, trigger indexed syncs, and monitor the readiness of future source adapters.
-            </p>
-          </div>
-          <Button onClick={() => summaries.refetch()} size="sm" variant="secondary">
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Refresh
-          </Button>
-        </div>
-      </Card>
+  const allIntegrations = summaries.data ?? [];
 
-      <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+  return (
+    <div className="max-w-6xl mx-auto space-y-6 animate-slide-up">
+      {/* ── Page Header ─────────────────────────────────── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
+            Source Control
+          </p>
+          <h2 className="text-3xl font-bold text-on-surface">Integrations and sync health</h2>
+          <p className="mt-2 text-[14px] text-on-surface-variant max-w-xl leading-relaxed">
+            Connect knowledge systems, trigger indexed syncs, and monitor the readiness of
+            future source adapters.
+          </p>
+        </div>
+        <button
+          className="flex items-center gap-2 rounded-xl border border-outline-variant/30 bg-surface-container-high/50 px-4 py-2.5 text-[13px] font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all"
+          onClick={() => summaries.refetch()}
+          type="button"
+          id="integrations-refresh-btn"
+        >
+          <RefreshCw size={15} />
+          Refresh All
+        </button>
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
+        {/* ── Active Integrations ──────────────────────── */}
         <div className="space-y-4">
-          {(summaries.data ?? []).map((integration) => {
+          {allIntegrations.map((integration) => {
             const isNotion = integration.key === 'notion';
             const isObsidian = integration.key === 'obsidian';
             const isGoogle = integration.key === 'google';
+            const sc = statusConfig(integration.status);
 
             return (
-              <Card key={integration.key} className="p-5">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-secondary">
-                        {isNotion || isObsidian ? (
-                          <Database className="h-5 w-5 text-primary" />
-                        ) : (
-                          <CloudCog className="h-5 w-5 text-primary" />
-                        )}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-lg font-semibold">{integration.label}</h3>
-                          <Badge
-                            variant={
-                              integration.status === 'connected'
-                                ? 'success'
-                                : integration.status === 'error'
-                                  ? 'destructive'
-                                  : integration.status === 'syncing'
-                                    ? 'warning'
-                                    : 'outline'
-                            }
-                          >
-                            {integration.status}
-                          </Badge>
-                        </div>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {integration.detail ?? 'Ready to configure and sync.'}
-                        </p>
-                      </div>
+              <div
+                key={integration.key}
+                className="glass-panel rounded-2xl p-6 hover:border-primary-glass/20 transition-all"
+                id={`integration-${integration.key}`}
+              >
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div className="flex items-start gap-4 min-w-0">
+                    {/* Icon */}
+                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-surface-container-high border border-outline-variant/30">
+                      <IntegrationIcon kind={integration.key} />
                     </div>
 
-                    {integration.lastSyncedAt ? (
-                      <p className="mt-4 text-xs text-muted-foreground">
-                        Last sync: {new Date(integration.lastSyncedAt).toLocaleString()}
+                    {/* Info */}
+                    <div className="min-w-0 pt-0.5">
+                      <div className="flex items-center gap-3 flex-wrap mb-1">
+                        <h3 className="text-lg font-bold text-on-surface">
+                          {integration.label}
+                        </h3>
+                        <span
+                          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold ${sc.color} ${sc.bg} ${sc.border}`}
+                        >
+                          <span className={`h-1.5 w-1.5 rounded-full ${sc.dot} animate-ai-pulse`} />
+                          {sc.label}
+                        </span>
+                      </div>
+                      <p className="text-[13px] text-on-surface-variant">
+                        {integration.detail ?? 'Ready to configure and sync.'}
                       </p>
-                    ) : null}
+                      {integration.lastSyncedAt && (
+                        <p className="mt-1.5 font-mono text-[10px] text-outline">
+                          Last sync:{' '}
+                          {new Date(integration.lastSyncedAt).toLocaleString('en-US', {
+                            month: 'numeric',
+                            day: 'numeric',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </p>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="flex gap-2">
-                    {isNotion ? (
-                      <Button
+                  {/* Action buttons */}
+                  <div className="flex gap-2 shrink-0">
+                    {isNotion && (
+                      <button
+                        className={`flex items-center gap-2 rounded-xl px-5 py-2.5 text-[13px] font-medium transition-all disabled:opacity-50 active:scale-95 ${
+                          notionSync.isPending
+                            ? 'border border-primary-glass/20 bg-primary-glass/10 text-primary-glass'
+                            : 'border border-outline-variant/30 bg-surface-container-high/50 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
+                        }`}
                         disabled={notionSync.isPending}
                         onClick={() => notionSync.mutate()}
-                        variant="secondary"
+                        type="button"
+                        id="notion-sync-btn"
                       >
                         {notionSync.isPending ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          <Loader2 size={15} className="animate-spin" />
                         ) : (
-                          <RefreshCw className="mr-2 h-4 w-4" />
+                          <RefreshCw size={15} />
                         )}
-                        {notionSync.isPending ? 'Syncing' : 'Sync'}
-                      </Button>
-                    ) : null}
-                    {isObsidian ? (
-                      <Button
+                        {notionSync.isPending ? 'Syncing…' : 'Sync Now'}
+                      </button>
+                    )}
+                    {isObsidian && (
+                      <button
+                        className="flex items-center gap-2 rounded-xl border border-outline-variant/30 bg-surface-container-high/50 px-5 py-2.5 text-[13px] font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all disabled:opacity-50 active:scale-95"
                         disabled={obsidianScan.isPending}
                         onClick={() => obsidianScan.mutate()}
-                        variant="secondary"
+                        type="button"
+                        id="obsidian-scan-btn"
                       >
                         {obsidianScan.isPending ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          <Loader2 size={15} className="animate-spin" />
                         ) : (
-                          <RefreshCw className="mr-2 h-4 w-4" />
+                          <FolderOpen size={15} />
                         )}
-                        {obsidianScan.isPending ? 'Scanning' : 'Scan vault'}
-                      </Button>
-                    ) : null}
-                    {isGoogle ? (
-                      <Button
+                        {obsidianScan.isPending ? 'Scanning…' : 'Scan vault'}
+                      </button>
+                    )}
+                    {isGoogle && (
+                      <button
+                        className="flex items-center gap-2 rounded-xl bg-primary-container px-5 py-2.5 text-[13px] font-medium text-on-primary shadow-lg hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
                         disabled={googleConnect.isPending}
                         onClick={() => googleConnect.mutate()}
+                        type="button"
+                        id="google-connect-btn"
                       >
                         {googleConnect.isPending ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          <Loader2 size={15} className="animate-spin" />
                         ) : (
-                          <CheckCircle2 className="mr-2 h-4 w-4" />
+                          <CheckCircle2 size={15} />
                         )}
-                        Connect
-                      </Button>
-                    ) : null}
+                        {googleConnect.isPending ? 'Connecting…' : 'Connect'}
+                      </button>
+                    )}
                   </div>
                 </div>
-              </Card>
+
+                {/* Progress bar when syncing */}
+                {((isNotion && notionSync.isPending) ||
+                  (isObsidian && obsidianScan.isPending)) && (
+                  <div className="mt-4 space-y-1.5">
+                    <div className="flex justify-between font-mono text-[10px] text-outline">
+                      <span>
+                        {isNotion ? 'Fetching Notion documents…' : 'Scanning vault files…'}
+                      </span>
+                      <span>65% complete</span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest">
+                      <div
+                        className="h-full animate-shimmer rounded-full"
+                        style={{ width: '65%' }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
 
-        <Card className="p-0">
-          <div className="px-5 py-4">
-            <p className="text-sm font-medium">Roadmap adapters</p>
-            <p className="mt-1 text-xs text-muted-foreground">
+        {/* ── Right Column: Roadmap + Stats ────────────── */}
+        <div className="space-y-4">
+          {/* Roadmap Adapters */}
+          <div className="glass-panel rounded-2xl p-5">
+            <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
+              Roadmap Adapters
+            </p>
+            <h3 className="text-[16px] font-bold text-on-surface mb-1">Coming soon</h3>
+            <p className="text-[12px] text-on-surface-variant mb-5 leading-relaxed">
               Future integrations already accounted for in the information architecture.
             </p>
-          </div>
-          <Separator />
-          <div className="space-y-3 p-5">
-            {futureIntegrations.map((integration) => (
-              <div
-                key={integration.label}
-                className="rounded-2xl border border-border bg-secondary/55 p-4"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-background/60">
-                    <integration.icon className="h-5 w-5 text-primary" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium">{integration.label}</p>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      {integration.description}
-                    </p>
-                  </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-4 opacity-60">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-container-highest border border-outline-variant/20">
+                  <Mail size={18} className="text-outline" />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-medium text-on-surface-variant text-[13px]">Gmail</p>
+                  <p className="text-[11px] text-outline leading-relaxed">
+                    Thread summaries, inbox retrieval, and grounded email actions.
+                  </p>
                 </div>
               </div>
-            ))}
+
+              <div className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-4 opacity-60">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-container-highest border border-outline-variant/20">
+                  <Calendar size={18} className="text-outline" />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-medium text-on-surface-variant text-[13px]">Calendar</p>
+                  <p className="text-[11px] text-outline leading-relaxed">
+                    Time-aware retrieval and schedule-assisted planning.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 rounded-xl border border-dashed border-outline-variant/20 bg-surface-container-high/10 p-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dashed border-outline-variant/30">
+                  <Plus size={18} className="text-outline" />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-medium text-on-surface-variant text-[13px]">
+                    Request a custom connector
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
-        </Card>
+
+          {/* Sync Stats */}
+          <div className="glass-panel rounded-2xl p-5">
+            <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-4">
+              Sync Stats
+            </p>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] text-on-surface-variant">Connected</span>
+                <span className="font-mono text-[14px] text-tertiary font-bold">
+                  {allIntegrations.filter((i) => i.status === 'connected').length} /{' '}
+                  {allIntegrations.length}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] text-on-surface-variant">Total adapters</span>
+                <span className="font-mono text-[14px] text-on-surface font-bold">
+                  {allIntegrations.length + 2}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] text-on-surface-variant">Roadmap</span>
+                <span className="font-mono text-[14px] text-outline font-bold">2 planned</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

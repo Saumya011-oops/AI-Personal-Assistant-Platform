@@ -1,20 +1,12 @@
+import { useEffect, useRef, useState } from 'react';
 import {
-  ArrowUpRight,
-  AtSign,
-  Mic,
   Paperclip,
-  SearchCheck,
-  Sparkles,
+  Mic,
+  ArrowUpRight,
+  CornerDownLeft,
+  Zap,
 } from 'lucide-react';
 
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
-import { Separator } from '@/components/ui/separator';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Textarea } from '@/components/ui/textarea';
 import { useDocumentsQuery } from '@/features/documents/hooks/use-documents-query';
 import { useIntegrationSummariesQuery } from '@/features/integrations/hooks/use-integration-summaries-query';
 
@@ -27,229 +19,280 @@ const draftMessages = [
   {
     role: 'assistant',
     content:
-      'The platform can already ground answers against the normalized document store and route through the desktop backend. Notion and Obsidian are the main retrieval sources, while Google auth is ready as an integration foundation.',
-  },
-  {
-    role: 'assistant',
-    content:
-      'If you want, I can turn this into an execution checklist, a risk memo, or a prioritized next sprint plan.',
+      'The platform can already ground answers against the normalized document store and route through the desktop backend. Notion and Obsidian are the main retrieval foundations currently operational.',
+    streaming: true,
   },
 ];
 
 export function AssistantPage() {
+  const [inputText, setInputText] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const documents = useDocumentsQuery();
   const integrations = useIntegrationSummariesQuery();
 
-  const citationItems = (documents.data ?? []).slice(0, 5);
-  const connectedSources = (integrations.data ?? []).filter(
-    (item) => item.status === 'connected',
-  );
+  const citationItems = (documents.data ?? []).slice(0, 8);
+  const connectedSources = (integrations.data ?? []).filter((i) => i.status === 'connected');
+
+  // Auto-resize textarea
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [inputText]);
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-6.25rem)] max-w-[1600px] min-h-[760px] flex-col gap-4">
-      <Card className="px-6 py-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <Badge variant="secondary">Focused assistant</Badge>
-              <Badge variant="outline">Grounded responses</Badge>
-            </div>
-            <h2 className="mt-3 text-2xl font-semibold tracking-tight">
-              Dedicated conversation workspace with citations and source context
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              Chat lives here now, separate from the landing overview, so responses, evidence,
-              and retrieval context can stay in one focused workflow.
-            </p>
+    <div className="flex h-[calc(100vh-8.5rem)] max-w-[1600px] mx-auto gap-6 animate-slide-up">
+      {/* ── Main Chat Panel ────────────────────────────────── */}
+      <section className="flex flex-1 flex-col overflow-hidden min-w-0">
+        {/* Page Header */}
+        <div className="pb-5">
+          <div className="flex flex-wrap gap-2 mb-3">
+            <span className="rounded-full border border-outline-variant/30 bg-surface-container-high px-3 py-1 text-[11px] font-medium text-on-surface">
+              Focused assistant
+            </span>
+            <span className="rounded-full border border-outline-variant/10 bg-surface-container-low px-3 py-1 text-[11px] text-outline">
+              Grounded responses
+            </span>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="success">
-              <SearchCheck className="mr-1.5 h-3 w-3" />
-              {connectedSources.length} source{connectedSources.length === 1 ? '' : 's'} connected
-            </Badge>
-            <Badge variant="outline">
-              {citationItems.length} citation candidate{citationItems.length === 1 ? '' : 's'}
-            </Badge>
+          <h2 className="text-2xl font-bold text-on-surface tracking-tight">
+            Dedicated conversation workspace with citations and source context
+          </h2>
+          <p className="mt-2 text-[13px] text-on-surface-variant leading-relaxed max-w-2xl">
+            Chat lives here, separate from the landing overview — responses, evidence, and
+            retrieval context in one focused workflow.
+          </p>
+        </div>
+
+        {/* Source + citation status pills */}
+        <div className="flex flex-wrap items-center gap-3 pb-4 border-b border-surface-container-highest">
+          <div className="flex items-center gap-2 rounded-full border border-primary-glass/20 bg-primary-glass/5 px-3 py-1 text-[12px] text-primary-glass">
+            <span className="w-1.5 h-1.5 rounded-full bg-primary-glass animate-ai-pulse" />
+            {connectedSources.length} sources connected
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-outline-variant/20 bg-surface-container-high px-3 py-1 text-[12px] text-on-surface-variant">
+            {citationItems.length} citation candidates
           </div>
         </div>
-      </Card>
 
-      <ResizablePanelGroup
-        className="min-h-0 flex-1 rounded-[30px] border border-border bg-card/65"
-        direction="horizontal"
-      >
-        <ResizablePanel defaultSize={68} minSize={52}>
-          <div className="flex h-full flex-col">
-            <div className="flex items-center justify-between px-6 py-5">
-              <div>
-                <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
-                  Conversation
-                </p>
-                <h3 className="mt-2 text-lg font-semibold">Grounded response session</h3>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary">Streaming-ready</Badge>
-                <Badge variant="outline">Source scoped</Badge>
-              </div>
+        {/* Conversation area */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Conversation label */}
+          <div className="flex items-center justify-between py-4">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
+                Conversation
+              </p>
+              <h3 className="text-[15px] font-semibold text-on-surface">
+                Grounded response session
+              </h3>
             </div>
-            <Separator />
-            <div className="flex-1 overflow-auto px-6 py-5">
-              <div className="mx-auto flex max-w-4xl flex-col gap-4">
-                <div className="flex flex-wrap gap-2">
-                  {['Summarize latest sync state', 'Compare Notion and Obsidian notes', 'List missing integration gaps'].map(
-                    (prompt) => (
-                      <button
-                        key={prompt}
-                        className="rounded-full border border-border bg-secondary/55 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary/30 hover:text-foreground"
-                        type="button"
-                      >
-                        {prompt}
-                      </button>
-                    ),
+            <div className="flex gap-2">
+              <span className="rounded-full border border-tertiary/20 bg-tertiary/10 px-3 py-1 text-[11px] font-medium text-tertiary">
+                Streaming-ready
+              </span>
+              <span className="rounded-full border border-outline-variant/20 bg-surface-container-high px-3 py-1 text-[11px] text-on-surface-variant">
+                Source scoped
+              </span>
+            </div>
+          </div>
+
+          {/* Suggested prompts */}
+          <div className="flex flex-wrap gap-2 pb-4">
+            {[
+              'Summarize latest sync state',
+              'Compare Notion and Obsidian notes',
+              'List missing integration gaps',
+            ].map((p) => (
+              <button
+                key={p}
+                className="rounded-xl border border-outline-variant/30 bg-surface-container-high/50 px-3 py-1.5 text-[12px] text-on-surface-variant hover:border-primary-glass/30 hover:text-on-surface transition-all"
+                type="button"
+                onClick={() => setInputText(p)}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto custom-scrollbar space-y-5 pb-4">
+            {draftMessages.map((message, index) => (
+              <div
+                key={`${message.role}-${index}`}
+                className={`flex gap-3 items-start ${message.role === 'user' ? 'justify-end' : ''}`}
+              >
+                {message.role === 'assistant' && (
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-outline-variant/40 bg-surface-container-highest">
+                    <Zap size={14} className="text-primary-glass" />
+                  </div>
+                )}
+                <div
+                  className={`max-w-[85%] rounded-2xl px-5 py-4 ${
+                    message.role === 'user'
+                      ? 'glass-panel border-primary-glass/20 bg-primary-glass/10 rounded-tr-sm'
+                      : 'glass-panel rounded-tl-sm'
+                  }`}
+                >
+                  <p
+                    className={`text-[14px] leading-relaxed text-on-surface ${
+                      message.streaming ? 'streaming-text' : ''
+                    }`}
+                  >
+                    {message.content}
+                  </p>
+                  {message.role === 'assistant' && (
+                    <div className="flex items-center gap-2 mt-3 pt-3 border-t border-outline-variant/15">
+                      <span className="text-[11px] text-outline">Found in:</span>
+                      {connectedSources.slice(0, 2).map((src) => (
+                        <span
+                          key={src.key}
+                          className="rounded bg-surface-container-high px-2 py-0.5 text-[11px] text-primary-glass border border-primary-glass/20"
+                        >
+                          @{src.label}
+                        </span>
+                      ))}
+                      {connectedSources.length === 0 && (
+                        <>
+                          <span className="rounded bg-surface-container-high px-2 py-0.5 text-[11px] text-primary-glass border border-primary-glass/20">
+                            @Notion Docs
+                          </span>
+                          <span className="rounded bg-surface-container-high px-2 py-0.5 text-[11px] text-primary-glass border border-primary-glass/20">
+                            @Obsidian Vault
+                          </span>
+                        </>
+                      )}
+                    </div>
                   )}
                 </div>
+              </div>
+            ))}
+          </div>
 
-                {draftMessages.map((message, index) => (
-                  <div
-                    key={`${message.role}-${index}`}
-                    className={`flex gap-3 ${message.role === 'assistant' ? '' : 'justify-end'}`}
-                  >
-                    {message.role === 'assistant' ? (
-                      <Avatar className="mt-1 h-9 w-9">
-                        <AvatarFallback>AI</AvatarFallback>
-                      </Avatar>
-                    ) : null}
-                    <div
-                      className={`max-w-[82%] rounded-[28px] px-4 py-3 ${
-                        message.role === 'assistant'
-                          ? 'border border-border bg-secondary/60'
-                          : 'bg-primary text-primary-foreground'
+          {/* ── Composer ─────────────────────────────────────── */}
+          <div
+            className={`glass-panel-solid rounded-2xl border p-4 mt-2 transition-all ${
+              inputText.length > 0 ? 'animate-thinking' : 'border-outline-variant/30'
+            }`}
+          >
+            {/* Context chips */}
+            <div className="flex flex-wrap gap-1.5 mb-3">
+              {['@Notion', '@Obsidian', '/grounded'].map((chip) => (
+                <button
+                  key={chip}
+                  className="rounded-lg bg-surface-container-high px-2 py-1 text-[11px] text-on-surface-variant hover:text-primary-glass transition-colors border border-outline-variant/20"
+                  type="button"
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+
+            <textarea
+              ref={textareaRef}
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              className="w-full resize-none overflow-hidden border-none bg-transparent text-[14px] text-on-surface placeholder:text-outline focus:outline-none"
+              placeholder="Ask a grounded question…"
+              rows={1}
+              id="assistant-input"
+            />
+
+            <div className="mt-2 flex items-center justify-between border-t border-outline-variant/15 pt-3">
+              <div className="flex items-center gap-3 text-outline">
+                <button
+                  className="hover:text-primary-glass transition-colors"
+                  type="button"
+                  aria-label="Attach file"
+                >
+                  <Paperclip size={18} />
+                </button>
+                <button
+                  className="hover:text-primary-glass transition-colors"
+                  type="button"
+                  aria-label="Voice input"
+                >
+                  <Mic size={18} />
+                </button>
+              </div>
+              <button
+                className="flex items-center gap-2 rounded-xl bg-primary-container px-5 py-2 text-[13px] font-medium text-on-primary shadow-lg hover:brightness-110 active:scale-95 transition-all"
+                type="button"
+                id="assistant-send-btn"
+              >
+                Ask assistant
+                <ArrowUpRight size={15} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Right Evidence Rail ────────────────────────────── */}
+      <aside className="w-[340px] shrink-0 flex flex-col border-l border-surface-container-highest bg-surface-container-low/50 -mr-6 -my-6 pl-5 pr-6 py-6">
+        <div className="pb-4 border-b border-surface-container-highest">
+          <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
+            Context
+          </p>
+          <h3 className="text-[18px] font-semibold text-on-surface">Evidence, sources, and activity</h3>
+        </div>
+
+        {/* Tabs: Citations / Sources / Activity */}
+        <div className="flex border-b border-surface-container-highest mt-4 mb-4">
+          {['Citations', 'Sources', 'Activity'].map((tab, i) => (
+            <button
+              key={tab}
+              className={`px-4 py-2 text-[12px] font-semibold border-b-2 transition-colors ${
+                i === 0
+                  ? 'border-primary-glass text-primary-glass'
+                  : 'border-transparent text-outline hover:text-on-surface'
+              }`}
+              type="button"
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3">
+          {citationItems.length === 0 ? (
+            <div className="rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-6 text-center">
+              <CornerDownLeft size={28} className="text-outline mx-auto mb-2" />
+              <p className="text-[13px] text-on-surface-variant">
+                Citations will appear here as you ask questions.
+              </p>
+            </div>
+          ) : (
+            citationItems.map((doc) => (
+              <div
+                key={doc.id}
+                className="rounded-xl border border-outline-variant/15 bg-surface-container-high/30 p-4 hover:border-primary-glass/30 transition-all cursor-pointer group"
+              >
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="min-w-0">
+                    <h4 className="font-semibold text-on-surface text-[13px] truncate group-hover:text-primary-glass transition-colors">
+                      {doc.title}
+                    </h4>
+                    <span
+                      className={`font-mono text-[9px] uppercase font-bold ${
+                        doc.sourceKind === 'notion' ? 'text-primary-glass' : 'text-tertiary'
                       }`}
                     >
-                      <p className="text-sm leading-7">{message.content}</p>
-                    </div>
+                      {doc.sourceKind}
+                    </span>
                   </div>
-                ))}
-              </div>
-            </div>
-            <Separator />
-            <div className="px-6 py-5">
-              <div className="mx-auto max-w-4xl rounded-[28px] border border-border bg-background/70 p-4">
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline">@Notion</Badge>
-                  <Badge variant="outline">@Obsidian</Badge>
-                  <Badge variant="outline">/grounded</Badge>
+                  <span className="shrink-0 rounded bg-surface-container-highest px-1.5 py-0.5 text-[9px] text-outline border border-outline-variant/30">
+                    Candidate
+                  </span>
                 </div>
-                <Textarea
-                  className="mt-3 min-h-[132px] resize-none border-0 bg-transparent px-0 py-0 shadow-none focus-visible:ring-0"
-                  placeholder="Ask a grounded question about your synced knowledge, source changes, or implementation risks…"
-                />
-                <div className="mt-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Button size="icon" variant="ghost">
-                      <Paperclip className="h-4 w-4" />
-                    </Button>
-                    <Button size="icon" variant="ghost">
-                      <Mic className="h-4 w-4" />
-                    </Button>
-                    <Button size="icon" variant="ghost">
-                      <AtSign className="h-4 w-4" />
-                    </Button>
-                    <span>Enter to send</span>
-                  </div>
-                  <Button className="h-11 rounded-2xl px-5">
-                    Ask assistant
-                    <ArrowUpRight className="ml-2 h-4 w-4" />
-                  </Button>
-                </div>
+                <p className="text-[12px] text-on-surface-variant leading-relaxed line-clamp-3">
+                  {doc.contentPlaintext.slice(0, 160)}…
+                </p>
               </div>
-            </div>
-          </div>
-        </ResizablePanel>
-
-        <ResizableHandle withHandle />
-
-        <ResizablePanel defaultSize={32} minSize={24}>
-          <div className="flex h-full flex-col">
-            <div className="px-5 py-5">
-              <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
-                Context
-              </p>
-              <h3 className="mt-2 text-lg font-semibold">Evidence, sources, and activity</h3>
-            </div>
-            <Separator />
-            <div className="min-h-0 flex-1 px-4 py-4">
-              <Tabs className="flex h-full flex-col" defaultValue="citations">
-                <TabsList className="w-full justify-start">
-                  <TabsTrigger value="citations">Citations</TabsTrigger>
-                  <TabsTrigger value="sources">Sources</TabsTrigger>
-                  <TabsTrigger value="activity">Activity</TabsTrigger>
-                </TabsList>
-
-                <TabsContent className="mt-4 flex-1 overflow-auto" value="citations">
-                  <div className="space-y-3">
-                    {citationItems.map((document) => (
-                      <Card key={document.id} className="p-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium">{document.title}</p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {document.sourceKind}
-                            </p>
-                          </div>
-                          <Badge variant="outline">Candidate</Badge>
-                        </div>
-                        <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                          {document.contentPlaintext.slice(0, 180)}...
-                        </p>
-                      </Card>
-                    ))}
-                  </div>
-                </TabsContent>
-
-                <TabsContent className="mt-4 flex-1 overflow-auto" value="sources">
-                  <div className="space-y-3">
-                    {connectedSources.map((source) => (
-                      <Card key={source.key} className="p-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-sm font-medium">{source.label}</p>
-                          <Badge variant="success">{source.status}</Badge>
-                        </div>
-                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                          {source.detail ?? 'Connected and available to the assistant.'}
-                        </p>
-                      </Card>
-                    ))}
-                  </div>
-                </TabsContent>
-
-                <TabsContent className="mt-4 flex-1 overflow-auto" value="activity">
-                  <Card className="p-4">
-                    <div className="flex items-center gap-2 text-sm font-medium">
-                      <Sparkles className="h-4 w-4 text-primary" />
-                      Streaming architecture
-                    </div>
-                    <div className="mt-4 space-y-3">
-                      {[
-                        'Prompt enters a dedicated composer with slash-style context selection.',
-                        'Answer stream is reserved for grounded citations and follow-up suggestions.',
-                        'Context rail keeps evidence visible without crowding the main conversation.',
-                      ].map((item) => (
-                        <div
-                          key={item}
-                          className="rounded-2xl border border-border bg-secondary/55 px-4 py-3 text-sm text-muted-foreground"
-                        >
-                          {item}
-                        </div>
-                      ))}
-                    </div>
-                  </Card>
-                </TabsContent>
-              </Tabs>
-            </div>
-          </div>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+            ))
+          )}
+        </div>
+      </aside>
     </div>
   );
 }
