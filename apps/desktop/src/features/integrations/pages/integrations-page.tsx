@@ -1,35 +1,27 @@
-import { AlertCircle, CheckCircle2, Clock, Database, Loader2, RefreshCw, Wifi, XCircle } from 'lucide-react';
+import {
+  CheckCircle2,
+  CloudCog,
+  Database,
+  Loader2,
+  Mail,
+  RefreshCw,
+} from 'lucide-react';
 
+import { ErrorState } from '@/components/states/error-state';
+import { LoadingState } from '@/components/states/loading-state';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Separator } from '@/components/ui/separator';
 import { useGoogleConnectMutation } from '@/features/integrations/hooks/use-google-connect-mutation';
 import { useIntegrationSummariesQuery } from '@/features/integrations/hooks/use-integration-summaries-query';
 import { useNotionSyncMutation } from '@/features/integrations/hooks/use-notion-sync-mutation';
 import { useObsidianScanMutation } from '@/features/integrations/hooks/use-obsidian-scan-mutation';
 
-const statusIcon = (status: string) => {
-  switch (status) {
-    case 'connected':
-      return <CheckCircle2 className="h-5 w-5 text-emerald-400" />;
-    case 'syncing':
-      return <Loader2 className="h-5 w-5 animate-spin text-indigo-400" />;
-    case 'error':
-      return <XCircle className="h-5 w-5 text-red-400" />;
-    default:
-      return <AlertCircle className="h-5 w-5 text-slate-500" />;
-  }
-};
-
-const integrationIcon = (key: string) => {
-  switch (key) {
-    case 'notion':
-      return <Database className="h-6 w-6 text-slate-300" />;
-    case 'obsidian':
-      return <Database className="h-6 w-6 text-purple-400" />;
-    default:
-      return <Wifi className="h-6 w-6 text-blue-400" />;
-  }
-};
+const futureIntegrations = [
+  { label: 'Gmail', icon: Mail, description: 'Thread summaries, inbox retrieval, and grounded email actions.' },
+  { label: 'Calendar', icon: CloudCog, description: 'Time-aware retrieval and schedule-assisted planning.' },
+];
 
 export function IntegrationsPage() {
   const summaries = useIntegrationSummariesQuery();
@@ -38,147 +30,167 @@ export function IntegrationsPage() {
   const googleConnect = useGoogleConnectMutation();
 
   if (summaries.isLoading) {
-    return (
-      <div className="flex items-center justify-center py-16">
-        <Loader2 className="h-8 w-8 animate-spin text-slate-500" />
-        <span className="ml-3 text-slate-400">Loading integrations…</span>
-      </div>
-    );
+    return <LoadingState label="Loading integration status and sync health." />;
   }
 
   if (summaries.isError) {
-    const errorObj = (summaries as any).error;
-    const errMsg = errorObj instanceof Error
-      ? errorObj.message
-      : typeof errorObj === 'string'
-        ? errorObj
-        : JSON.stringify(errorObj, null, 2);
     return (
-      <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6">
-        <div className="flex items-center gap-3">
-          <XCircle className="h-6 w-6 text-red-400" />
-          <div>
-            <p className="font-semibold text-red-300">Failed to load integrations</p>
-            <p className="mt-1 text-sm text-red-400/70 font-mono">
-              {errMsg}
-            </p>
-          </div>
-        </div>
-        <Button className="mt-4" variant="secondary" onClick={() => summaries.refetch()}>
-          <RefreshCw className="mr-2 h-4 w-4" /> Retry
-        </Button>
-      </div>
-    );
-  }
-
-  const items = summaries.data ?? [];
-
-  if (items.length === 0) {
-    return (
-      <div className="rounded-2xl border border-border/60 p-10 text-center">
-        <AlertCircle className="mx-auto h-10 w-10 text-slate-500" />
-        <p className="mt-4 text-slate-400">No integrations found. The database may still be initialising — try refreshing.</p>
-        <Button className="mt-4" variant="secondary" onClick={() => summaries.refetch()}>
-          <RefreshCw className="mr-2 h-4 w-4" /> Refresh
-        </Button>
-      </div>
+      <ErrorState
+        description="The desktop app could not read source integration status."
+        onRetry={() => summaries.refetch()}
+        title="Failed to load integrations"
+      />
     );
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Integrations</h2>
-        <Button variant="ghost" size="sm" onClick={() => summaries.refetch()}>
-          <RefreshCw className="mr-2 h-4 w-4" /> Refresh
-        </Button>
-      </div>
-
-      {items.map((integration) => (
-        <Card key={integration.key}>
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-center gap-4">
-              <div className="rounded-xl bg-white/5 p-3">
-                {integrationIcon(integration.key)}
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-semibold">{integration.label}</h3>
-                  {statusIcon(integration.status)}
-                </div>
-                <p className="mt-0.5 text-sm text-slate-400 capitalize">
-                  {integration.status.replaceAll('_', ' ')}
-                  {integration.detail ? ` · ${integration.detail}` : ''}
-                </p>
-                {integration.lastSyncedAt && (
-                  <p className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
-                    <Clock className="h-3 w-3" />
-                    Last synced: {new Date(integration.lastSyncedAt).toLocaleString()}
-                  </p>
-                )}
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              {integration.key === 'notion' ? (
-                <Button
-                  onClick={() => notionSync.mutate()}
-                  variant="secondary"
-                  disabled={notionSync.isPending}
-                >
-                  {notionSync.isPending ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                  )}
-                  {notionSync.isPending ? 'Syncing…' : 'Sync Notion'}
-                </Button>
-              ) : null}
-
-              {integration.key === 'obsidian' ? (
-                <Button
-                  onClick={() => obsidianScan.mutate()}
-                  variant="secondary"
-                  disabled={obsidianScan.isPending}
-                >
-                  {obsidianScan.isPending ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Database className="mr-2 h-4 w-4" />
-                  )}
-                  {obsidianScan.isPending ? 'Scanning…' : 'Scan vault'}
-                </Button>
-              ) : null}
-
-              {integration.key === 'google' ? (
-                <Button
-                  onClick={() => googleConnect.mutate()}
-                  disabled={googleConnect.isPending}
-                >
-                  {googleConnect.isPending ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Wifi className="mr-2 h-4 w-4" />
-                  )}
-                  Connect Google
-                </Button>
-              ) : null}
-            </div>
+      <Card className="p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+              Source Control
+            </p>
+            <h2 className="mt-1 text-xl font-semibold">Integrations and sync health</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Connect knowledge systems, trigger indexed syncs, and monitor the readiness of future source adapters.
+            </p>
           </div>
+          <Button onClick={() => summaries.refetch()} size="sm" variant="secondary">
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Refresh
+          </Button>
+        </div>
+      </Card>
 
-          {/* Show error if sync failed */}
-          {integration.key === 'notion' && notionSync.isError && (
-            <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-              Sync failed: {String(notionSync.error)}
-            </div>
-          )}
-          {integration.key === 'obsidian' && obsidianScan.isError && (
-            <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-              Scan failed: {String(obsidianScan.error)}
-            </div>
-          )}
+      <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="space-y-4">
+          {(summaries.data ?? []).map((integration) => {
+            const isNotion = integration.key === 'notion';
+            const isObsidian = integration.key === 'obsidian';
+            const isGoogle = integration.key === 'google';
+
+            return (
+              <Card key={integration.key} className="p-5">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-secondary">
+                        {isNotion || isObsidian ? (
+                          <Database className="h-5 w-5 text-primary" />
+                        ) : (
+                          <CloudCog className="h-5 w-5 text-primary" />
+                        )}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-lg font-semibold">{integration.label}</h3>
+                          <Badge
+                            variant={
+                              integration.status === 'connected'
+                                ? 'success'
+                                : integration.status === 'error'
+                                  ? 'destructive'
+                                  : integration.status === 'syncing'
+                                    ? 'warning'
+                                    : 'outline'
+                            }
+                          >
+                            {integration.status}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {integration.detail ?? 'Ready to configure and sync.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {integration.lastSyncedAt ? (
+                      <p className="mt-4 text-xs text-muted-foreground">
+                        Last sync: {new Date(integration.lastSyncedAt).toLocaleString()}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="flex gap-2">
+                    {isNotion ? (
+                      <Button
+                        disabled={notionSync.isPending}
+                        onClick={() => notionSync.mutate()}
+                        variant="secondary"
+                      >
+                        {notionSync.isPending ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                        )}
+                        {notionSync.isPending ? 'Syncing' : 'Sync'}
+                      </Button>
+                    ) : null}
+                    {isObsidian ? (
+                      <Button
+                        disabled={obsidianScan.isPending}
+                        onClick={() => obsidianScan.mutate()}
+                        variant="secondary"
+                      >
+                        {obsidianScan.isPending ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                        )}
+                        {obsidianScan.isPending ? 'Scanning' : 'Scan vault'}
+                      </Button>
+                    ) : null}
+                    {isGoogle ? (
+                      <Button
+                        disabled={googleConnect.isPending}
+                        onClick={() => googleConnect.mutate()}
+                      >
+                        {googleConnect.isPending ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="mr-2 h-4 w-4" />
+                        )}
+                        Connect
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+
+        <Card className="p-0">
+          <div className="px-5 py-4">
+            <p className="text-sm font-medium">Roadmap adapters</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Future integrations already accounted for in the information architecture.
+            </p>
+          </div>
+          <Separator />
+          <div className="space-y-3 p-5">
+            {futureIntegrations.map((integration) => (
+              <div
+                key={integration.label}
+                className="rounded-2xl border border-border bg-secondary/55 p-4"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-background/60">
+                    <integration.icon className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">{integration.label}</p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {integration.description}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </Card>
-      ))}
+      </div>
     </div>
   );
 }

@@ -1,330 +1,524 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { BookOpen, Database, ExternalLink, FileText, Search, Sparkles, Trash2, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  ArrowUpRight,
+  BookOpen,
+  Database,
+  FileText,
+  Search,
+  Tags,
+} from 'lucide-react';
+import {
+  startTransition,
+  useEffect,
+  type KeyboardEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/states/empty-state';
 import { LoadingState } from '@/components/states/loading-state';
+import { Badge } from '@/components/ui/badge';
+import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
+import { Separator } from '@/components/ui/separator';
 import { useDocumentsQuery } from '@/features/documents/hooks/use-documents-query';
-import { invokeCommand } from '@/lib/api/invoke-command';
 
-const sourceIcon = (kind: string) => {
-  switch (kind) {
-    case 'notion': return <BookOpen className="h-4 w-4 text-indigo-400" />;
-    case 'obsidian': return <Database className="h-4 w-4 text-purple-400" />;
-    default: return <FileText className="h-4 w-4 text-slate-400" />;
-  }
-};
-
-const sourceBadgeColor = (kind: string) => {
-  switch (kind) {
-    case 'notion': return 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30';
-    case 'obsidian': return 'bg-purple-500/10 text-purple-300 border-purple-500/30';
-    default: return 'bg-slate-500/10 text-slate-300 border-slate-500/30';
-  }
+const sourceMeta = {
+  notion: {
+    label: 'Notion',
+    icon: BookOpen,
+    badge: 'secondary' as const,
+  },
+  obsidian: {
+    label: 'Obsidian',
+    icon: Database,
+    badge: 'success' as const,
+  },
 };
 
 export function DocumentsPage() {
   const query = useDocumentsQuery();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
-  const [sourceFilter, setSourceFilter] = useState<string>('all');
-  const [semanticMode, setSemanticMode] = useState(false);
+  const [source, setSource] = useState<'all' | 'notion' | 'obsidian'>('all');
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const previousDocumentIdRef = useRef<string | null>(null);
+  const previewScrollPositionsRef = useRef<Record<string, number>>({});
 
-  const allDocs = query.data ?? [];
+  const documents = query.data;
 
-  // Get unique source kinds
-  const sourceKinds = useMemo(() => {
-    const kinds = new Set(allDocs.map(d => d.sourceKind));
-    return Array.from(kinds);
-  }, [allDocs]);
+  const filteredDocuments = useMemo(() => {
+    const normalizedQuery = search.trim().toLowerCase();
 
-  // Semantic query hook (only active in semanticMode when search is entered)
-  const semanticQuery = useQuery({
-    queryKey: ['documents-semantic', search],
-    queryFn: () => invokeCommand('search_documents_semantic', { query: search, limit: 15 }),
-    enabled: semanticMode && search.trim().length > 0,
+    return (documents ?? []).filter((document) => {
+      const matchesSource = source === 'all' || document.sourceKind === source;
+      const matchesQuery =
+        normalizedQuery.length === 0 ||
+        document.title.toLowerCase().includes(normalizedQuery) ||
+        document.contentPlaintext.toLowerCase().includes(normalizedQuery) ||
+        document.tags.some((tag) => tag.toLowerCase().includes(normalizedQuery));
+
+      return matchesSource && matchesQuery;
+    });
+  }, [documents, search, source]);
+
+  useEffect(() => {
+    if (!filteredDocuments.length) {
+      setSelectedDocumentId(null);
+      return;
+    }
+
+    const hasActiveDocument = filteredDocuments.some(
+      (document) => document.id === selectedDocumentId,
+    );
+
+    if (!hasActiveDocument) {
+      setSelectedDocumentId(filteredDocuments[0]?.id ?? null);
+    }
+  }, [filteredDocuments, selectedDocumentId]);
+
+  const activeIndex = Math.max(
+    filteredDocuments.findIndex((document) => document.id === selectedDocumentId),
+    0,
+  );
+  const activeDocument = filteredDocuments[activeIndex] ?? filteredDocuments[0] ?? null;
+
+  useLayoutEffect(() => {
+    const previewElement = previewRef.current;
+    const previousId = previousDocumentIdRef.current;
+
+    if (previewElement && previousId) {
+      previewScrollPositionsRef.current[previousId] = previewElement.scrollTop;
+    }
+
+    if (previewElement && activeDocument) {
+      previewElement.scrollTop = previewScrollPositionsRef.current[activeDocument.id] ?? 0;
+    }
+
+    previousDocumentIdRef.current = activeDocument?.id ?? null;
+  }, [activeDocument]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredDocuments.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 132,
+    overscan: 8,
   });
 
-  // Clear documents mutation
-  const clearMutation = useMutation({
-    mutationFn: () => invokeCommand('clear_all_documents', {}),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['documents'] });
-      queryClient.invalidateQueries({ queryKey: ['integrations'] });
-      queryClient.invalidateQueries({ queryKey: ['app-status'] });
-      setSearch('');
-    },
-  });
-
-  // Filter full-text documents locally for instant feedback
-  const filteredDocs = useMemo(() => {
-    let docs = allDocs;
-    if (sourceFilter !== 'all') {
-      docs = docs.filter(d => d.sourceKind === sourceFilter);
+  const retrievalSegments = useMemo(() => {
+    if (!activeDocument) {
+      return [];
     }
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      docs = docs.filter(d =>
-        d.title.toLowerCase().includes(q) ||
-        d.contentPlaintext.toLowerCase().includes(q)
-      );
-    }
-    return docs;
-  }, [allDocs, search, sourceFilter]);
 
-  // Filter semantic results locally by source if filter is active
-  const filteredSemanticResults = useMemo(() => {
-    let results = semanticQuery.data ?? [];
-    if (sourceFilter !== 'all') {
-      results = results.filter(r => r.payload.source === sourceFilter);
-    }
-    return results;
-  }, [semanticQuery.data, sourceFilter]);
+    return activeDocument.contentPlaintext
+      .split(/\n{2,}/)
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .slice(0, 6);
+  }, [activeDocument]);
 
-  if (query.isLoading) {
-    return <LoadingState label="Loading documents from local store…" />;
+  const relatedDocuments = useMemo(() => {
+    if (!activeDocument) {
+      return [];
+    }
+
+    return filteredDocuments
+      .filter(
+        (document) =>
+          document.id !== activeDocument.id &&
+          (document.sourceKind === activeDocument.sourceKind ||
+            document.tags.some((tag) => activeDocument.tags.includes(tag))),
+      )
+      .slice(0, 4);
+  }, [activeDocument, filteredDocuments]);
+
+  function handleSelectDocument(id: string) {
+    startTransition(() => {
+      setSelectedDocumentId(id);
+    });
   }
 
-  if (!allDocs.length) {
+  function handleListKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (!filteredDocuments.length) {
+      return;
+    }
+
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') {
+      return;
+    }
+
+    event.preventDefault();
+
+    const offset = event.key === 'ArrowDown' ? 1 : -1;
+    const nextIndex = Math.min(
+      Math.max(activeIndex + offset, 0),
+      filteredDocuments.length - 1,
+    );
+    const nextDocument = filteredDocuments[nextIndex];
+
+    if (!nextDocument) {
+      return;
+    }
+
+    handleSelectDocument(nextDocument.id);
+    rowVirtualizer.scrollToIndex(nextIndex, { align: 'auto' });
+  }
+
+  if (query.isLoading) {
+    return <LoadingState label="Loading indexed documents from the local store." />;
+  }
+
+  if (!documents?.length) {
     return (
       <EmptyState
-        title="No documents indexed yet"
-        description="Run Notion sync or Obsidian vault scan to populate your knowledge base."
-        action={
-          <Button variant="secondary" onClick={() => navigate('/integrations')}>
-            Go to Integrations
-          </Button>
-        }
+        description="Run a Notion sync or scan your Obsidian vault to populate the knowledge explorer."
+        title="Knowledge base is still empty"
+      />
+    );
+  }
+
+  if (!activeDocument) {
+    return (
+      <EmptyState
+        description="Adjust the active filters to bring documents back into view."
+        title="No document matches the current filter"
       />
     );
   }
 
   return (
-    <div className="space-y-4">
-      {/* Header + stats */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold">Documents</h2>
-          <p className="mt-0.5 text-sm text-slate-400">
-            {allDocs.length} total indexed documents
-          </p>
-        </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => {
-            if (confirm("Are you sure you want to clear all documents, chunks, and vector embeddings? This cannot be undone.")) {
-              clearMutation.mutate();
-            }
-          }}
-          disabled={clearMutation.isPending}
-          className="flex items-center gap-2 bg-red-950/40 text-red-400 border border-red-500/25 hover:bg-red-900/30 hover:text-red-300 transition-colors"
-        >
-          <Trash2 className="h-4 w-4" />
-          {clearMutation.isPending ? 'Clearing Index…' : 'Clear Index'}
-        </Button>
-      </div>
-
-      {/* Search mode tabs */}
-      <div className="flex items-center justify-between border-b border-border/40 pb-1">
-        <div className="flex gap-4">
-          <button
-            onClick={() => setSemanticMode(false)}
-            className={`border-b-2 pb-1.5 text-sm font-medium transition-colors ${
-              !semanticMode
-                ? 'border-indigo-500 text-indigo-400 font-semibold'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Full-Text Search
-          </button>
-          <button
-            onClick={() => setSemanticMode(true)}
-            className={`flex items-center gap-1.5 border-b-2 pb-1.5 text-sm font-medium transition-colors ${
-              semanticMode
-                ? 'border-indigo-500 text-indigo-400 font-semibold'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            AI Semantic Search (Local Qdrant)
-          </button>
-        </div>
-      </div>
-
-      {/* Search + filter bar */}
-      <div className="flex flex-col gap-3 sm:flex-row">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-          <input
-            className="w-full rounded-2xl border border-border/60 bg-white/5 py-2.5 pl-10 pr-10 text-sm outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/30"
-            placeholder={
-              semanticMode
-                ? "Ask a question or type a concept (e.g. 'RAG specification' or 'Notion keys')…"
-                : "Search by title or content…"
-            }
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-          {search && (
-            <button
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-              onClick={() => setSearch('')}
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
-        </div>
-
-        {/* Source filter pills */}
-        <div className="flex gap-2">
-          {['all', ...sourceKinds].map(kind => (
-            <button
-              key={kind}
-              onClick={() => setSourceFilter(kind)}
-              className={`rounded-xl border px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
-                sourceFilter === kind
-                  ? 'border-indigo-500/60 bg-indigo-500/20 text-indigo-300'
-                  : 'border-border/60 bg-white/5 text-slate-400 hover:border-border hover:text-slate-300'
-              }`}
-            >
-              {kind}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Results panel */}
-      {semanticMode ? (
-        // --- AI SEMANTIC SEARCH RESULTS ---
-        search.trim().length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border/60 py-16 text-center text-slate-500">
-            <Sparkles className="mb-3 h-10 w-10 text-indigo-500/40" />
-            <p className="max-w-md text-sm leading-relaxed">
-              Enter a search query or a question above to perform a local semantic similarity search against the Qdrant vector database using nomic-embed-text!
+    <div className="mx-auto flex h-[calc(100vh-6.25rem)] max-w-[1700px] min-h-[760px] flex-col gap-4">
+      <Card className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground">
+              Knowledge base
+            </p>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight">
+              Split-view document explorer for fast retrieval browsing
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+              Browse the corpus like a desktop workspace: filter quickly, switch documents
+              instantly, and keep preview context visible while you inspect metadata.
             </p>
           </div>
-        ) : semanticQuery.isLoading ? (
-          <LoadingState label="Computing query embedding & querying Qdrant vector database…" />
-        ) : semanticQuery.isError ? (
-          <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center text-red-400">
-            Failed to run semantic search: {String(semanticQuery.error)}
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="outline">{documents?.length ?? 0} indexed</Badge>
+            <Badge variant="secondary">Keyboard navigation</Badge>
           </div>
-        ) : filteredSemanticResults.length === 0 ? (
-          <div className="rounded-2xl border border-border/60 p-8 text-center text-slate-400">
-            No semantic matches found for "{search}"
+        </div>
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          <div className="relative min-w-[320px] flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="pl-10"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search titles, content, or tags…"
+              value={search}
+            />
           </div>
-        ) : (
-          <div className="space-y-3">
-            <p className="text-xs text-slate-500 px-1">
-              Top semantic matches from Qdrant:
-            </p>
-            {filteredSemanticResults.map(result => {
-              const payload = result.payload as Record<string, any>;
-              const source = (payload.source as string) || 'unknown';
-              const title = (payload.title as string) || 'Untitled Match';
-              const content = (payload.content as string) || '';
-              const pathOrUrl = (payload.path_or_url as string) || null;
-              const matchPercentage = Math.round(result.score * 100);
+          <div className="flex gap-2">
+            {(['all', 'notion', 'obsidian'] as const).map((value) => (
+              <button
+                key={value}
+                className={`rounded-2xl border px-3 py-2 text-sm transition ${
+                  source === value
+                    ? 'border-primary/30 bg-primary/10 text-primary'
+                    : 'border-border bg-secondary/60 text-muted-foreground hover:text-foreground'
+                }`}
+                onClick={() => setSource(value)}
+                type="button"
+              >
+                {value === 'all' ? 'All sources' : sourceMeta[value].label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
 
-              return (
-                <Card key={result.id} className="relative overflow-hidden border-indigo-500/20 bg-indigo-500/[0.02]">
-                  {/* Subtle top indicator bar */}
-                  <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-indigo-500/40 via-purple-500/40 to-transparent" />
-                  
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        {sourceIcon(source)}
-                        <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${sourceBadgeColor(source)}`}>
-                          {source}
-                        </span>
-                        
-                        {/* Similarity Score Badge */}
-                        <span className="rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-1.5 py-0.5 text-[10px] font-bold">
-                          {matchPercentage}% Semantic Match
-                        </span>
-                      </div>
-                      
-                      <h3 className="mt-2 truncate text-base font-semibold text-slate-200">{title}</h3>
-                      
-                      {/* Highlighted text snippet */}
-                      <div className="mt-2 rounded-xl bg-black/30 p-3 border border-border/40">
-                        <p className="line-clamp-4 text-xs font-mono text-slate-300 leading-relaxed">
-                          {content || 'No text content snippet available'}
-                        </p>
-                      </div>
-                    </div>
+      <ResizablePanelGroup
+        className="min-h-0 flex-1 rounded-[30px] border border-border bg-card/65"
+        direction="horizontal"
+      >
+        <ResizablePanel defaultSize={29} minSize={24}>
+          <div className="flex h-full flex-col">
+            <div className="px-5 py-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                Results
+              </p>
+              <h3 className="mt-2 text-lg font-semibold">{filteredDocuments.length} retrievable document{filteredDocuments.length === 1 ? '' : 's'}</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Use arrow keys to move through the list.
+              </p>
+            </div>
+            <Separator />
+            <div
+              ref={listRef}
+              className="min-h-0 flex-1 overflow-auto px-3 py-3 outline-none"
+              onKeyDown={handleListKeyDown}
+              tabIndex={0}
+            >
+              <div
+                className="relative w-full"
+                style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+              >
+                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const document = filteredDocuments[virtualRow.index];
+                  const meta =
+                    document
+                      ? sourceMeta[document.sourceKind as keyof typeof sourceMeta] ?? {
+                          label: document.sourceKind,
+                          icon: FileText,
+                          badge: 'outline' as const,
+                        }
+                      : {
+                          label: 'Unknown',
+                          icon: FileText,
+                          badge: 'outline' as const,
+                        };
+                  const Icon = meta.icon;
 
-                    {pathOrUrl && (
-                      <a
-                        href={pathOrUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-1 shrink-0 text-slate-500 hover:text-slate-300"
-                        title="Open source"
+                  if (!document) {
+                    return null;
+                  }
+                  const isActive = document.id === activeDocument.id;
+
+                  return (
+                    <div
+                      key={document.id}
+                      className="absolute left-0 top-0 w-full px-1 py-1"
+                      style={{ transform: `translateY(${virtualRow.start}px)` }}
+                    >
+                      <button
+                        className={`w-full rounded-[24px] border px-4 py-4 text-left transition ${
+                          isActive
+                            ? 'border-primary/30 bg-primary/10'
+                            : 'border-transparent bg-secondary/50 hover:border-border'
+                        }`}
+                        onClick={() => handleSelectDocument(document.id)}
+                        type="button"
                       >
-                        <ExternalLink className="h-4 w-4" />
-                      </a>
+                        <div className="flex items-center gap-2">
+                          <Icon className="h-4 w-4 text-primary" />
+                          <Badge variant={meta.badge}>{meta.label}</Badge>
+                          {document.tags[0] ? (
+                            <Badge variant="outline">{document.tags[0]}</Badge>
+                          ) : null}
+                        </div>
+                        <p className="mt-3 text-sm font-medium">
+                          {highlightText(document.title, search)}
+                        </p>
+                        <p className="mt-2 line-clamp-3 text-sm leading-6 text-muted-foreground">
+                          {highlightText(document.contentPlaintext.slice(0, 180), search)}
+                        </p>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </ResizablePanel>
+
+        <ResizableHandle withHandle />
+
+        <ResizablePanel defaultSize={46} minSize={34}>
+          <div className="flex h-full flex-col">
+            <div className="flex items-center justify-between gap-4 px-6 py-4">
+              <div className="min-w-0">
+                <p className="truncate text-lg font-semibold">{activeDocument.title}</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Switch documents without losing explorer context
+                </p>
+              </div>
+              {activeDocument.pathOrUrl ? (
+                <a
+                  className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                  href={activeDocument.pathOrUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Open source
+                  <ArrowUpRight className="h-4 w-4" />
+                </a>
+              ) : null}
+            </div>
+            <Separator />
+            <div ref={previewRef} className="min-h-0 flex-1 overflow-auto px-6 py-5">
+              <div className="space-y-6">
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{activeDocument.sourceKind}</Badge>
+                  <Badge variant="secondary">Checksum tracked</Badge>
+                  <Badge variant="secondary">
+                    {activeDocument.tags.length} tag{activeDocument.tags.length === 1 ? '' : 's'}
+                  </Badge>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <MetaCard label="Created" value={formatDate(activeDocument.createdAt)} />
+                  <MetaCard label="Updated" value={formatDate(activeDocument.updatedAt)} />
+                  <MetaCard label="External ID" value={truncate(activeDocument.sourceExternalId)} />
+                </div>
+
+                <div>
+                  <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                    Preview
+                  </p>
+                  <div className="mt-4 space-y-5 text-sm leading-8 text-foreground">
+                    {activeDocument.contentPlaintext
+                      .split(/\n{2,}/)
+                      .filter(Boolean)
+                      .map((segment, index) => (
+                        <p key={`${activeDocument.id}-${index}`}>
+                          {highlightText(segment, search)}
+                        </p>
+                      ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </ResizablePanel>
+
+        <ResizableHandle withHandle />
+
+        <ResizablePanel defaultSize={25} minSize={20}>
+          <div className="flex h-full flex-col">
+            <div className="px-5 py-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                Inspector
+              </p>
+              <h3 className="mt-2 text-lg font-semibold">Chunks, metadata, and related context</h3>
+            </div>
+            <Separator />
+            <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+              <div className="space-y-4">
+                <Card className="p-4">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <Tags className="h-4 w-4 text-primary" />
+                    Tags and source relations
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {activeDocument.tags.length > 0 ? (
+                      activeDocument.tags.map((tag) => (
+                        <Badge key={tag} variant="outline">
+                          {tag}
+                        </Badge>
+                      ))
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No tags attached yet.</p>
                     )}
                   </div>
                 </Card>
-              );
-            })}
-          </div>
-        )
-      ) : (
-        // --- STANDARD FULL-TEXT SEARCH RESULTS ---
-        filteredDocs.length === 0 ? (
-          <div className="rounded-2xl border border-border/60 p-8 text-center text-slate-400">
-            No documents match "{search}"
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {filteredDocs.map(document => (
-              <Card key={document.id}>
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      {sourceIcon(document.sourceKind)}
-                      <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${sourceBadgeColor(document.sourceKind)}`}>
-                        {document.sourceKind}
-                      </span>
-                      {document.tags.length > 0 && (
-                        <span className="text-xs text-slate-500">{document.tags.length} tags</span>
-                      )}
-                    </div>
-                    <h3 className="mt-2 truncate text-base font-semibold">{document.title}</h3>
-                    <p className="mt-1 line-clamp-2 text-sm text-slate-400">
-                      {document.contentPlaintext.slice(0, 200) || 'No content preview'}
-                    </p>
-                    {document.updatedAt && (
-                      <p className="mt-1 text-xs text-slate-600">
-                        Updated {new Date(document.updatedAt).toLocaleDateString()}
+
+                <Card className="p-4">
+                  <p className="text-sm font-medium">Chunk candidates</p>
+                  <div className="mt-3 space-y-3">
+                    {retrievalSegments.map((segment, index) => (
+                      <div
+                        key={`${activeDocument.id}-${index}`}
+                        className="rounded-2xl border border-border bg-secondary/55 px-3 py-3"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                            Chunk {index + 1}
+                          </p>
+                          <Badge variant="secondary">Linked</Badge>
+                        </div>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                          {highlightText(segment.slice(0, 180), search)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+
+                <Card className="p-4">
+                  <p className="text-sm font-medium">Related documents</p>
+                  <div className="mt-3 space-y-3">
+                    {relatedDocuments.length > 0 ? (
+                      relatedDocuments.map((document) => (
+                        <button
+                          key={document.id}
+                          className="w-full rounded-2xl border border-border bg-secondary/55 px-3 py-3 text-left transition hover:border-primary/30"
+                          onClick={() => handleSelectDocument(document.id)}
+                          type="button"
+                        >
+                          <p className="text-sm font-medium">{document.title}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {document.sourceKind}
+                          </p>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        No closely related documents are visible in the current filter set.
                       </p>
                     )}
                   </div>
-                  {document.pathOrUrl && (
-                    <a
-                      href={document.pathOrUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 shrink-0 text-slate-500 hover:text-slate-300"
-                      title="Open source"
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                    </a>
-                  )}
-                </div>
-              </Card>
-            ))}
+                </Card>
+              </div>
+            </div>
           </div>
-        )
-      )}
+        </ResizablePanel>
+      </ResizablePanelGroup>
     </div>
   );
+}
+
+function MetaCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-border bg-secondary/50 px-4 py-3">
+      <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{label}</p>
+      <p className="mt-2 text-sm font-medium">{value}</p>
+    </div>
+  );
+}
+
+function formatDate(value: string | null) {
+  if (!value) {
+    return 'Unavailable';
+  }
+
+  return new Date(value).toLocaleString();
+}
+
+function truncate(value: string, maxLength = 18) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}…`;
+}
+
+function highlightText(text: string, query: string) {
+  const normalizedQuery = query.trim();
+
+  if (!normalizedQuery) {
+    return text;
+  }
+
+  const parts = text.split(new RegExp(`(${escapeRegExp(normalizedQuery)})`, 'gi'));
+
+  return parts.map((part, index) =>
+    part.toLowerCase() === normalizedQuery.toLowerCase() ? (
+      <mark
+        key={`${part}-${index}`}
+        className="rounded bg-primary/15 px-1 text-foreground"
+      >
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
