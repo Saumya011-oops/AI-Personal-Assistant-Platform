@@ -19,11 +19,15 @@ import {
 import { EmptyState } from '@/components/states/empty-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { useDocumentsQuery } from '@/features/documents/hooks/use-documents-query';
+import { invokeCommand } from '@/lib/api/invoke-command';
 
 export function DocumentsPage() {
   const query = useDocumentsQuery();
   const [search, setSearch] = useState('');
   const [source, setSource] = useState<'all' | 'notion' | 'obsidian'>('all');
+  const [searchMode, setSearchMode] = useState<'exact' | 'similarity'>('exact');
+  const [semanticResults, setSemanticResults] = useState<any[]>([]);
+  const [semanticSearchQuery, setSemanticSearchQuery] = useState('');
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'analysis'>('details');
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -31,10 +35,56 @@ export function DocumentsPage() {
   const previousDocumentIdRef = useRef<string | null>(null);
   const previewScrollPositionsRef = useRef<Record<string, number>>({});
 
+  useEffect(() => {
+    if (searchMode !== 'similarity' || !search.trim()) {
+      setSemanticResults([]);
+      setSemanticSearchQuery('');
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      invokeCommand('search_documents_semantic', { query: search, limit: 15 })
+        .then((data: any) => {
+          if (data) {
+            setSemanticResults(data);
+            setSemanticSearchQuery(search);
+          }
+        })
+        .catch((err) => console.error('Semantic search failed:', err));
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, [search, searchMode]);
+
   const documents = query.data;
 
   const filteredDocuments = useMemo(() => {
     const normalizedQuery = search.trim().toLowerCase();
+    const normalizedSemanticQuery = semanticSearchQuery.trim().toLowerCase();
+
+    if (searchMode === 'similarity' && normalizedSemanticQuery.length > 0) {
+      const docsMap = new Map<string, number>(); // document_id -> max_score
+      semanticResults.forEach((res) => {
+        const docId = res.payload?.document_id;
+        if (docId) {
+          const currentScore = res.score ?? 0;
+          const prevScore = docsMap.get(docId) ?? 0;
+          docsMap.set(docId, Math.max(prevScore, currentScore));
+        }
+      });
+
+      return (documents ?? [])
+        .filter((document) => {
+          const matchesSource = source === 'all' || document.sourceKind === source;
+          return matchesSource && docsMap.has(document.id);
+        })
+        .map((document) => ({
+          ...document,
+          similarityScore: docsMap.get(document.id) ?? 0,
+        }))
+        .sort((a, b) => b.similarityScore - a.similarityScore);
+    }
+
     return (documents ?? []).filter((document) => {
       const matchesSource = source === 'all' || document.sourceKind === source;
       const matchesQuery =
@@ -44,7 +94,7 @@ export function DocumentsPage() {
         document.tags.some((tag) => tag.toLowerCase().includes(normalizedQuery));
       return matchesSource && matchesQuery;
     });
-  }, [documents, search, source]);
+  }, [documents, search, source, searchMode, semanticResults, semanticSearchQuery]);
 
   useEffect(() => {
     if (!filteredDocuments.length) {
@@ -78,7 +128,7 @@ export function DocumentsPage() {
   const rowVirtualizer = useVirtualizer({
     count: filteredDocuments.length,
     getScrollElement: () => listRef.current,
-    estimateSize: () => 120,
+    estimateSize: () => 148,
     overscan: 8,
   });
 
@@ -166,10 +216,36 @@ export function DocumentsPage() {
             <input
               className="w-full rounded-xl border border-outline-variant/30 bg-surface-container-high/50 py-2.5 pl-9 pr-3 text-[13px] text-on-surface placeholder:text-outline focus:outline-none focus:border-primary-glass/40 transition-colors"
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search titles, content, tags…"
+              placeholder={searchMode === 'similarity' ? "Ask a question or topic..." : "Search titles, content, tags…"}
               value={search}
               id="documents-search"
             />
+          </div>
+
+          {/* Search Mode Toggle */}
+          <div className="flex rounded-xl bg-surface-container-high/40 p-1 border border-outline-variant/15 text-[11px] font-medium">
+            <button
+              type="button"
+              className={`flex-1 py-1.5 rounded-lg text-center transition-all ${
+                searchMode === 'exact'
+                  ? 'bg-surface-container-highest text-on-surface font-semibold shadow-sm'
+                  : 'text-outline hover:text-on-surface'
+              }`}
+              onClick={() => setSearchMode('exact')}
+            >
+              Exact Search
+            </button>
+            <button
+              type="button"
+              className={`flex-1 py-1.5 rounded-lg text-center transition-all ${
+                searchMode === 'similarity'
+                  ? 'bg-primary-glass/10 text-primary-glass border border-primary-glass/20 font-semibold shadow-sm'
+                  : 'text-outline hover:text-on-surface'
+              }`}
+              onClick={() => setSearchMode('similarity')}
+            >
+              AI Similarity
+            </button>
           </div>
 
           {/* Source filter */}
@@ -211,11 +287,14 @@ export function DocumentsPage() {
               return (
                 <div
                   key={document.id}
-                  className="absolute left-0 top-0 w-full px-1 py-1"
-                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                  className="absolute left-0 top-0 w-full px-1 py-1 animate-fade-in"
+                  style={{
+                    height: `${virtualRow.size}px`,
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
                 >
                   <button
-                    className={`w-full rounded-xl p-4 text-left transition-all ${
+                    className={`w-full h-full rounded-xl p-3.5 text-left transition-all ${
                       isActive
                         ? 'border border-primary-glass/30 bg-primary-glass/8 shadow-sm'
                         : 'border border-transparent bg-surface-container-high/20 hover:bg-surface-container-high/40 hover:border-outline-variant/20'
@@ -235,8 +314,13 @@ export function DocumentsPage() {
                       >
                         {document.sourceKind}
                       </span>
+                      {searchMode === 'similarity' && (document as any).similarityScore !== undefined && (
+                        <span className="font-mono text-[9px] font-bold text-tertiary px-1.5 py-0.5 rounded bg-tertiary/10 border border-tertiary/20">
+                          {Math.round((document as any).similarityScore * 100)}% Match
+                        </span>
+                      )}
                     </div>
-                    <p className={`font-semibold text-[13px] mb-1 ${isActive ? 'text-primary-glass' : 'text-on-surface'}`}>
+                    <p className={`font-semibold text-[13px] mb-1 truncate ${isActive ? 'text-primary-glass' : 'text-on-surface'}`}>
                       {highlightText(document.title, search)}
                     </p>
                     <p className="text-[12px] text-on-surface-variant line-clamp-2 leading-relaxed">

@@ -134,6 +134,92 @@ pub struct DocumentChunk {
     pub content: String,
     pub token_count: i64,
     pub embedding_status: String,
+    /// 'standard' | 'parent' | 'child'
+    pub chunk_level: String,
+    /// Non-null for child chunks; references the parent summary chunk id
+    pub parent_chunk_id: Option<String>,
     pub created_at: String,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Week 4 — Retrieval Layer Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Input to the unified retrieve_documents command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalRequest {
+    pub query: String,
+    /// One of: "dense" | "sparse" | "hybrid" | "faceted" | "contextual" | "recursive"
+    pub strategy: String,
+    pub limit: Option<usize>,
+    pub filters: Option<RetrievalFilters>,
+    /// Number of sibling chunks to include on each side (for contextual strategy)
+    pub context_window: Option<usize>,
+}
+
+/// Optional payload filters applied during faceted or other filtered searches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalFilters {
+    pub source_kind: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub date_after: Option<String>,
+    pub date_before: Option<String>,
+}
+
+/// A single context chunk surrounding a primary result (contextual strategy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextChunk {
+    pub ordinal: i64,
+    pub content: String,
+    pub is_primary: bool,
+}
+
+/// A single retrieval result, enriched with context and parent information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalResult {
+    pub chunk_id: String,
+    pub document_id: String,
+    pub document_title: String,
+    pub source_kind: String,
+    pub content: String,
+    /// Normalised similarity / relevance score in [0, 1] range where applicable
+    pub score: f64,
+    /// 1-indexed rank within this strategy's result list
+    pub rank: usize,
+    pub strategy: String,
+    /// Surrounding chunks (populated by contextual and recursive strategies)
+    pub context_chunks: Vec<ContextChunk>,
+    /// Parent summary chunk content (populated by recursive strategy)
+    pub parent_content: Option<String>,
+    pub path_or_url: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// Top-level response returned by retrieve_documents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalResponse {
+    pub results: Vec<RetrievalResult>,
+    pub strategy_used: String,
+    pub total_results: usize,
+    pub query: String,
+    pub latency_ms: u64,
+}
+
+/// Used by test_retrieval_strategies — runs all 6 strategies and returns each.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllStrategiesResult {
+    pub query: String,
+    pub dense: RetrievalResponse,
+    pub sparse: RetrievalResponse,
+    pub hybrid: RetrievalResponse,
+    pub faceted: RetrievalResponse,
+    pub contextual: RetrievalResponse,
+    pub recursive: RetrievalResponse,
+    pub total_latency_ms: u64,
+}

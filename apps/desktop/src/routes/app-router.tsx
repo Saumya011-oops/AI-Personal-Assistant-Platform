@@ -24,6 +24,10 @@ const SettingsPage = lazy(async () => ({
   default: (await import('@/features/settings/pages/settings-page')).SettingsPage,
 }));
 
+const KnowledgeBasePage = lazy(async () => ({
+  default: (await import('@/features/knowledge-base/pages/knowledge-base-page')).KnowledgeBasePage,
+}));
+
 const router = createBrowserRouter(
   createRoutesFromElements(
     <Route element={<AppShell />} path="/">
@@ -51,6 +55,11 @@ const router = createBrowserRouter(
         element={<LazyPage><SettingsPage /></LazyPage>}
         handle={{ title: 'Settings', subtitle: 'Workspace preferences and auth' }}
         path="settings"
+      />
+      <Route
+        element={<LazyPage><KnowledgeBasePage /></LazyPage>}
+        handle={{ title: 'Retrieval Lab', subtitle: '6-strategy knowledge retrieval' }}
+        path="knowledge-base"
       />
     </Route>,
   ),

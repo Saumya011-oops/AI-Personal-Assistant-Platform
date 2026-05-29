@@ -1,6 +1,12 @@
 import { z } from 'zod';
 
-import { normalizedDocumentSchema, qdrantSearchResultSchema } from '../documents/types';
+import {
+  normalizedDocumentSchema,
+  qdrantSearchResultSchema,
+  retrievalRequestSchema,
+  retrievalResponseSchema,
+  allStrategiesResultSchema,
+} from '../documents/types';
 import { appErrorSchema } from '../errors/types';
 import { integrationSummarySchema, syncRunSchema } from '../integrations/types';
 import { appSettingsSchema, updateSettingsInputSchema } from '../settings/types';
@@ -95,6 +101,22 @@ export const tauriCommandSchemas = {
   clear_all_documents: {
     input: emptyPayloadSchema,
     output: z.unknown(),
+  },
+  // Week 4 — Retrieval Layer
+  retrieve_documents: {
+    input: retrievalRequestSchema,
+    output: retrievalResponseSchema,
+  },
+  test_retrieval_strategies: {
+    input: z.object({
+      query: z.string(),
+      limit: z.number().int().positive().nullable().optional(),
+    }),
+    output: allStrategiesResultSchema,
+  },
+  rebuild_recursive_index: {
+    input: emptyPayloadSchema,
+    output: z.number().int().nonnegative(),
   },
 } as const;
 

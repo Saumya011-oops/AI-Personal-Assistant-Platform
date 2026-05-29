@@ -70,6 +70,10 @@ pub fn run() {
             commands::documents::list_documents,
             commands::documents::search_documents_semantic,
             commands::documents::clear_all_documents,
+            // Week 4 — Retrieval Layer
+            commands::documents::retrieve_documents,
+            commands::documents::test_retrieval_strategies,
+            commands::documents::rebuild_recursive_index,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");

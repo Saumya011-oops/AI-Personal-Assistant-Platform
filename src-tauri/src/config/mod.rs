@@ -51,8 +51,10 @@ impl AppConfig {
         }
 
         let data_dir = env::var("APP_DATA_DIR")
+            .ok()
+            .filter(|val| !val.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+            .unwrap_or_else(|| {
                 dirs::data_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("assistant-core")

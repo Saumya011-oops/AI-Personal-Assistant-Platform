@@ -19,8 +19,9 @@ use crate::integrations::google::PendingOAuthState;
 use crate::integrations::notion::NotionIntegration;
 pub mod chunker;
 pub mod ollama;
-pub mod qdrant;
 pub mod pipeline;
+pub mod qdrant;
+pub mod retrieval;
 
 use crate::integrations::obsidian::ObsidianIntegration;
 
