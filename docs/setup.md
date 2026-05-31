@@ -1,41 +1,125 @@
-# Setup Guide
+# AI Personal Assistant Platform — Setup Guide
+
+## Architecture
+
+This is a **Tauri + React** desktop application with a Rust backend.
+
+```
+rag_sys/
+├── apps/desktop/          # React frontend (Vite + TypeScript)
+│   └── src/
+│       ├── app/           # Shell layout & providers
+│       ├── components/    # Shared UI components
+│       ├── features/      # Page-level feature modules
+│       │   ├── assistant/
+│       │   ├── dashboard/
+│       │   ├── documents/
+│       │   ├── integrations/
+│       │   ├── knowledge-base/   # Week 4 retrieval UI
+│       │   └── settings/
+│       ├── lib/           # Utilities (API, query client)
+│       └── routes/
+├── packages/shared/       # Shared TypeScript types
+├── src-tauri/             # Rust backend
+│   └── src/
+│       ├── app/           # Tauri app setup & command registration
+│       ├── commands/      # Tauri command handlers
+│       ├── config/        # App configuration
+│       ├── db/            # SQLite + repositories
+│       │   ├── migrations/
+│       │   └── repositories/
+│       ├── domain/        # Core types & domain models
+│       ├── integrations/  # Notion, Obsidian, Google
+│       ├── services/      # Business logic
+│       │   ├── chunker.rs    # Paragraph + recursive chunking
+│       │   ├── ollama.rs     # Embedding generation
+│       │   ├── pipeline.rs   # Ingestion pipeline
+│       │   ├── qdrant.rs     # Vector DB client
+│       │   └── retrieval.rs  # 6-strategy retrieval layer
+│       ├── tasks/         # Background sync scheduler
+│       └── telemetry/
+├── docs/
+│   ├── setup.md           # This file
+│   ├── T_AI_Personal_Assistant_MVP.pdf   # Project spec
+│   └── scripts/           # One-off data generation scripts
+└── .env.example
+```
 
 ## Prerequisites
 
-- Node.js 20+
-- npm 10+
-- Rust toolchain (`rustup`, `cargo`, `rustc`)
-- Tauri platform prerequisites for macOS
+| Tool | Version |
+|------|---------|
+| Node.js | 20+ |
+| npm | 10+ |
+| Rust toolchain | stable (via `rustup`) |
+| Tauri CLI | bundled via Cargo |
+| **Ollama** | running locally on port 11434 |
+| **Qdrant** | running locally on port 6333 |
 
-## Environment
-
-Copy `/Users/saumyathacker/Desktop/rag_sys/.env.example` to `.env` and provide:
-
-- `NOTION_TOKEN`
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `APP_SECRET_KEY`
-- `OBSIDIAN_DEFAULT_VAULT` or configure the path in-app
-
-## Development Commands
+### Start External Services
 
 ```bash
-npm install
-npm run dev
-npm run typecheck
-npm run lint
+# Start Qdrant (vector database)
+docker run -p 6333:6333 qdrant/qdrant
+
+# OR: if installed locally
+qdrant
+
+# Start Ollama (embedding model)
+ollama serve
+ollama pull nomic-embed-text  # or mxbai-embed-large
 ```
 
-## Week 1-2 Exit Criteria Verification
+## Environment Setup
 
-1. Notion:
-   Run the Notion sync from the Integrations page after setting `NOTION_TOKEN`.
-2. Obsidian:
-   Save a valid vault path in Settings, then run the vault scan from Integrations.
-3. Google OAuth:
-   Start Google connect from Integrations, complete the browser flow, then deliver the returned `code` and `state` to the `oauth_callback` command flow.
+Copy `.env.example` to `src-tauri/.env` and fill in:
 
-## Notes
+```env
+NOTION_TOKEN=secret_xxx
+GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-xxx
+APP_SECRET_KEY=some-32-char-secret
+QDRANT_URL=http://localhost:6333
+OLLAMA_URL=http://localhost:11434
+EMBEDDING_MODEL=nomic-embed-text
+```
 
-- Rust was not present on this machine during implementation, so Tauri and Cargo verification depend on installing the Rust toolchain first.
-- If npm dependency installation stalls, retry after clearing any partial install state and confirming network access for package downloads.
+## Development
+
+```bash
+# Install frontend dependencies
+npm install
+
+# Start the Tauri dev server (builds Rust + starts React)
+npm run tauri dev
+
+# TypeScript type check only
+npm run typecheck
+
+# Build production frontend only
+npm run build
+```
+
+## Week 4 — Retrieval Layer
+
+Six retrieval strategies are implemented in `src-tauri/src/services/retrieval.rs`:
+
+| Strategy | Description |
+|----------|-------------|
+| **Dense** | Qdrant cosine similarity on 768-dim embeddings |
+| **Sparse** | SQLite FTS5 BM25 keyword ranking |
+| **Hybrid** | Reciprocal Rank Fusion (RRF) of Dense + Sparse |
+| **Faceted** | Dense search with payload filters (source, tags, dates) |
+| **Contextual** | Dense search + surrounding sibling chunk window |
+| **Recursive** | Fine-grained child chunk search + parent summary |
+
+Run integration tests:
+```bash
+cd src-tauri && cargo test test_all_six_retrieval_strategies -- --nocapture
+```
+
+## Integrations
+
+1. **Notion**: Set `NOTION_TOKEN` → run Notion Sync from the Integrations page
+2. **Obsidian**: Set vault path in Settings → run vault scan from Integrations
+3. **Google OAuth**: Click Connect in Integrations → complete browser flow
