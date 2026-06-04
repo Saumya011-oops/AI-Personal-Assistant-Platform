@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 #[derive(Clone)]
 pub struct QdrantService {
@@ -15,6 +15,16 @@ pub struct QdrantPoint {
     pub id: String,
     pub vector: Vec<f32>,
     pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QdrantSearchFilter {
+    #[serde(default)]
+    pub must: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub should: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub must_not: Vec<serde_json::Value>,
 }
 
 impl QdrantService {
@@ -113,8 +123,13 @@ impl QdrantService {
         Ok(())
     }
 
-    /// Searches for similar points in Qdrant based on a query vector (dense retrieval).
-    pub async fn search_similar_points(&self, vector: Vec<f32>, limit: usize) -> Result<Vec<QdrantSearchResult>> {
+    /// Searches for similar points in Qdrant based on a query vector.
+    pub async fn search_similar_points(
+        &self,
+        vector: Vec<f32>,
+        limit: usize,
+        filter: Option<QdrantSearchFilter>,
+    ) -> Result<Vec<QdrantSearchResult>> {
         let url = format!(
             "{}/collections/{}/points/search",
             self.base_url.trim_end_matches('/'),
@@ -124,7 +139,8 @@ impl QdrantService {
         let payload = json!({
             "vector": vector,
             "limit": limit,
-            "with_payload": true
+            "with_payload": true,
+            "filter": filter
         });
 
         let response = self
@@ -145,111 +161,6 @@ impl QdrantService {
 
         let search_response: QdrantSearchResponse = response.json().await?;
         Ok(search_response.result)
-    }
-
-    /// Searches for similar points with an optional Qdrant filter payload.
-    /// This powers Faceted Retrieval (source_kind, tags, date range filtering).
-    ///
-    /// The `filter` argument is a Qdrant filter JSON object, e.g.:
-    /// ```json
-    /// { "must": [{ "key": "source", "match": { "value": "notion" } }] }
-    /// ```
-    pub async fn search_with_filter(
-        &self,
-        vector: Vec<f32>,
-        limit: usize,
-        filter: Option<Value>,
-    ) -> Result<Vec<QdrantSearchResult>> {
-        let url = format!(
-            "{}/collections/{}/points/search",
-            self.base_url.trim_end_matches('/'),
-            self.collection_name
-        );
-
-        let mut payload = json!({
-            "vector": vector,
-            "limit": limit,
-            "with_payload": true
-        });
-
-        if let Some(f) = filter {
-            payload["filter"] = f;
-        }
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Failed to search Qdrant collection '{}' with filter: {}",
-                self.collection_name,
-                error_text
-            ));
-        }
-
-        let search_response: QdrantSearchResponse = response.json().await?;
-        Ok(search_response.result)
-    }
-
-    /// Scrolls through points matching a filter without a query vector.
-    /// Used for faceted browsing / listing documents by metadata attribute.
-    pub async fn scroll_points(
-        &self,
-        filter: Option<Value>,
-        limit: usize,
-    ) -> Result<Vec<QdrantSearchResult>> {
-        let url = format!(
-            "{}/collections/{}/points/scroll",
-            self.base_url.trim_end_matches('/'),
-            self.collection_name
-        );
-
-        let mut payload = json!({
-            "limit": limit,
-            "with_payload": true,
-            "with_vector": false
-        });
-
-        if let Some(f) = filter {
-            payload["filter"] = f;
-        }
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Failed to scroll Qdrant collection '{}': {}",
-                self.collection_name,
-                error_text
-            ));
-        }
-
-        // Scroll response has a different structure: { result: { points: [...] } }
-        let raw: Value = response.json().await?;
-        let points = raw["result"]["points"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|p| {
-                let id = p["id"].as_str().map(|s| s.to_string())?;
-                let payload = p["payload"].clone();
-                Some(QdrantSearchResult { id, score: 0.0, payload })
-            })
-            .collect();
-
-        Ok(points)
     }
 
     /// Deletes and recreates the Qdrant collection to clear all vectors.

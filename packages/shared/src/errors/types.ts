@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const appErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
-  details: z.record(z.string(), z.unknown()).optional(),
+  details: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 export const commandEnvelopeSchema = <T extends z.ZodTypeAny>(payload: T) =>

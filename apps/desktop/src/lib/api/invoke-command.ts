@@ -23,23 +23,25 @@ export async function invokeCommand<T extends TauriCommandName>(
   const schema = tauriCommandSchemas[command];
   const parsedInput = schema.input.parse(payload);
 
+  let rawResult: unknown;
   try {
-    const raw = await invoke(
+    rawResult = await invoke(
       command,
       toSnakeCaseObject(parsedInput) as InvokeArgs,
     );
-    const parsed = commandResultSchema(schema.output).parse(raw);
-    if (!parsed.success || parsed.data === null || parsed.data === undefined) {
-      throw parsed.error ?? toAppError('UNKNOWN', 'Command returned no data');
-    }
-
-    return parsed.data;
   } catch (error) {
     throw toAppError('COMMAND_FAILED', 'Failed to execute desktop command', {
       command,
       cause: error,
     });
   }
+
+  const parsed = commandResultSchema(schema.output).parse(rawResult);
+  if (!parsed.success || parsed.data === null || parsed.data === undefined) {
+    throw parsed.error ?? toAppError('UNKNOWN', 'Command returned no data');
+  }
+
+  return parsed.data;
 }
 
 function toSnakeCaseObject(value: unknown): unknown {

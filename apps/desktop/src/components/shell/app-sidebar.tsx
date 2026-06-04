@@ -9,7 +9,6 @@ import {
   ChevronRight,
   MoreHorizontal,
   Zap,
-  Brain,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import { useUiStore } from '@/stores/ui-store';
@@ -42,13 +41,6 @@ const navItems: NavItem[] = [
     label: 'Knowledge Base',
     sublabel: 'Split-view document explorer',
     icon: <Database size={18} />,
-    section: 'workspace',
-  },
-  {
-    href: '/knowledge-base',
-    label: 'Retrieval Lab',
-    sublabel: '6-strategy RAG retrieval',
-    icon: <Brain size={18} />,
     section: 'workspace',
   },
   {

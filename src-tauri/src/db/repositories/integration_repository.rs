@@ -35,24 +35,7 @@ impl IntegrationRepository {
     pub fn list_integrations(&self) -> Result<Vec<IntegrationSummary>> {
         let connection = self.connection.lock().expect("db lock poisoned");
         let mut statement = connection.prepare(
-            "SELECT \
-                i.key, \
-                i.label, \
-                CASE \
-                    WHEN i.key = 'google' THEN \
-                        CASE \
-                            WHEN EXISTS (SELECT 1 FROM credentials WHERE provider = 'google') THEN i.status \
-                            ELSE 'not_connected' \
-                        END \
-                    ELSE i.status \
-                END as status, \
-                i.last_synced_at, \
-                CASE \
-                    WHEN i.key = 'google' AND NOT EXISTS (SELECT 1 FROM credentials WHERE provider = 'google') THEN NULL \
-                    ELSE i.detail \
-                END as detail \
-             FROM integrations i \
-             ORDER BY i.label",
+            "SELECT key, label, status, last_synced_at, detail FROM integrations ORDER BY label",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(IntegrationSummary {

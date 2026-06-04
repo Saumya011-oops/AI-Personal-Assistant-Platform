@@ -1,11 +1,10 @@
 import { z } from 'zod';
 
 import {
+  assistantResponseSchema,
   normalizedDocumentSchema,
   qdrantSearchResultSchema,
-  retrievalRequestSchema,
   retrievalResponseSchema,
-  allStrategiesResultSchema,
 } from '../documents/types';
 import { appErrorSchema } from '../errors/types';
 import { integrationSummarySchema, syncRunSchema } from '../integrations/types';
@@ -47,6 +46,10 @@ export const listDocumentsInputSchema = z.object({
 export const searchDocumentsSemanticInputSchema = z.object({
   query: z.string(),
   limit: z.number().int().nonnegative().nullable().optional(),
+});
+
+export const assistantQueryInputSchema = z.object({
+  query: z.string(),
 });
 
 export const tauriCommandSchemas = {
@@ -98,25 +101,17 @@ export const tauriCommandSchemas = {
     input: searchDocumentsSemanticInputSchema,
     output: z.array(qdrantSearchResultSchema),
   },
+  retrieve_documents: {
+    input: assistantQueryInputSchema,
+    output: retrievalResponseSchema,
+  },
+  ask_assistant: {
+    input: assistantQueryInputSchema,
+    output: assistantResponseSchema,
+  },
   clear_all_documents: {
     input: emptyPayloadSchema,
     output: z.unknown(),
-  },
-  // Week 4 — Retrieval Layer
-  retrieve_documents: {
-    input: retrievalRequestSchema,
-    output: retrievalResponseSchema,
-  },
-  test_retrieval_strategies: {
-    input: z.object({
-      query: z.string(),
-      limit: z.number().int().positive().nullable().optional(),
-    }),
-    output: allStrategiesResultSchema,
-  },
-  rebuild_recursive_index: {
-    input: emptyPayloadSchema,
-    output: z.number().int().nonnegative(),
   },
 } as const;
 

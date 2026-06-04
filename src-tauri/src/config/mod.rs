@@ -20,6 +20,16 @@ pub struct AppConfig {
     pub embedding_model: String,
     pub qdrant_url: String,
     pub qdrant_collection: String,
+    pub groq_api_key: Option<String>,
+    pub groq_base_url: String,
+    pub groq_model_primary: String,
+    pub groq_model_fallback: String,
+    pub reranker_model: String,
+    pub sparse_helper_port: u16,
+    pub reranker_helper_port: u16,
+    pub node_binary: String,
+    pub reranker_python_binary: String,
+    pub reranker_model_cache_dir: Option<PathBuf>,
 }
 
 impl AppConfig {
@@ -51,10 +61,8 @@ impl AppConfig {
         }
 
         let data_dir = env::var("APP_DATA_DIR")
-            .ok()
-            .filter(|val| !val.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
+            .unwrap_or_else(|_| {
                 dirs::data_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("assistant-core")
@@ -89,6 +97,57 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://localhost:6333".to_string()),
             qdrant_collection: env::var("QDRANT_COLLECTION")
                 .unwrap_or_else(|_| "assistant_documents".to_string()),
+            groq_api_key: env::var("GROQ_API_KEY").ok(),
+            groq_base_url: env::var("GROQ_BASE_URL")
+                .unwrap_or_else(|_| "https://api.groq.com/openai/v1".to_string()),
+            groq_model_primary: env::var("GROQ_MODEL_PRIMARY")
+                .unwrap_or_else(|_| "llama-3.3-70b-versatile".to_string()),
+            groq_model_fallback: env::var("GROQ_MODEL_FALLBACK")
+                .unwrap_or_else(|_| "llama-3.1-8b-instant".to_string()),
+            reranker_model: env::var("RERANKER_MODEL")
+                .unwrap_or_else(|_| "cross-encoder/ms-marco-MiniLM-L-6-v2".to_string()),
+            sparse_helper_port: env::var("SPARSE_HELPER_PORT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(8741),
+            reranker_helper_port: env::var("RERANKER_HELPER_PORT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(8742),
+            node_binary: env::var("NODE_BINARY").unwrap_or_else(|_| "node".to_string()),
+            reranker_python_binary: env::var("RERANKER_PYTHON_BINARY")
+                .unwrap_or_else(|_| ".venv-reranker/bin/python".to_string()),
+            reranker_model_cache_dir: env::var("RERANKER_MODEL_CACHE_DIR").ok().map(PathBuf::from),
         })
+    }
+
+    pub fn workspace_root(&self) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn sparse_helper_script_path(&self) -> PathBuf {
+        self.workspace_root()
+            .join("src-tauri")
+            .join("helpers")
+            .join("sparse_worker.cjs")
+    }
+
+    pub fn reranker_worker_script_path(&self) -> PathBuf {
+        self.workspace_root()
+            .join("src-tauri")
+            .join("helpers")
+            .join("reranker_worker.py")
+    }
+
+    pub fn reranker_python_path(&self) -> PathBuf {
+        let configured = PathBuf::from(&self.reranker_python_binary);
+        if configured.is_absolute() {
+            configured
+        } else {
+            self.workspace_root().join(configured)
+        }
     }
 }

@@ -117,6 +117,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "gray_matter",
+ "once_cell",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",

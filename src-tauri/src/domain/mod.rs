@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,92 +135,138 @@ pub struct DocumentChunk {
     pub content: String,
     pub token_count: i64,
     pub embedding_status: String,
-    /// 'standard' | 'parent' | 'child'
-    pub chunk_level: String,
-    /// Non-null for child chunks; references the parent summary chunk id
-    pub parent_chunk_id: Option<String>,
     pub created_at: String,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Week 4 — Retrieval Layer Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Input to the unified retrieve_documents command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct RetrievalRequest {
-    pub query: String,
-    /// One of: "dense" | "sparse" | "hybrid" | "faceted" | "contextual" | "recursive"
-    pub strategy: String,
-    pub limit: Option<usize>,
-    pub filters: Option<RetrievalFilters>,
-    /// Number of sibling chunks to include on each side (for contextual strategy)
-    pub context_window: Option<usize>,
+pub struct MetadataDateRange {
+    pub from: Option<String>,
+    pub to: Option<String>,
 }
 
-/// Optional payload filters applied during faceted or other filtered searches.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct RetrievalFilters {
-    pub source_kind: Option<String>,
+pub struct MetadataFilters {
+    pub source: Option<Vec<String>>,
+    pub author: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
-    pub date_after: Option<String>,
-    pub date_before: Option<String>,
+    pub category: Option<Vec<String>>,
+    pub date_range: Option<MetadataDateRange>,
 }
 
-/// A single context chunk surrounding a primary result (contextual strategy).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextChunk {
-    pub ordinal: i64,
-    pub content: String,
-    pub is_primary: bool,
+#[serde(rename_all = "lowercase")]
+pub enum QueryComplexity {
+    Simple,
+    Complex,
 }
 
-/// A single retrieval result, enriched with context and parent information.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RetrievalStrategy {
+    Dense,
+    Sparse,
+    Hybrid,
+    Faceted,
+    Contextual,
+    Recursive,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RetrievalResult {
+pub struct QueryAnalysis {
+    pub intent: String,
+    pub entities: Vec<String>,
+    pub metadata_filters: MetadataFilters,
+    pub temporal: bool,
+    pub complexity: QueryComplexity,
+    pub strategy: RetrievalStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SparseSearchHit {
+    pub chunk_id: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantQueryInput {
+    pub query: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Citation {
+    pub source: String,
+    pub document_id: String,
+    pub chunk_id: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantResponse {
+    pub answer: String,
+    pub citations: Vec<Citation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievedChunk {
     pub chunk_id: String,
     pub document_id: String,
+    pub source: String,
     pub document_title: String,
-    pub source_kind: String,
     pub content: String,
-    /// Normalised similarity / relevance score in [0, 1] range where applicable
-    pub score: f64,
-    /// 1-indexed rank within this strategy's result list
-    pub rank: usize,
-    pub strategy: String,
-    /// Surrounding chunks (populated by contextual and recursive strategies)
-    pub context_chunks: Vec<ContextChunk>,
-    /// Parent summary chunk content (populated by recursive strategy)
-    pub parent_content: Option<String>,
+    pub score: f32,
+    pub ordinal: i64,
     pub path_or_url: Option<String>,
     pub tags: Vec<String>,
+    pub author: Option<String>,
+    pub category: Option<String>,
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub metadata: Value,
 }
 
-/// Top-level response returned by retrieve_documents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrievalResponse {
-    pub results: Vec<RetrievalResult>,
-    pub strategy_used: String,
-    pub total_results: usize,
     pub query: String,
-    pub latency_ms: u64,
+    pub strategy_used: RetrievalStrategy,
+    pub analysis: QueryAnalysis,
+    pub results: Vec<RetrievedChunk>,
+    pub total_results: usize,
 }
 
-/// Used by test_retrieval_strategies — runs all 6 strategies and returns each.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AllStrategiesResult {
-    pub query: String,
-    pub dense: RetrievalResponse,
-    pub sparse: RetrievalResponse,
-    pub hybrid: RetrievalResponse,
-    pub faceted: RetrievalResponse,
-    pub contextual: RetrievalResponse,
-    pub recursive: RetrievalResponse,
-    pub total_latency_ms: u64,
+pub struct ChunkSearchDocument {
+    pub chunk_id: String,
+    pub document_id: String,
+    pub ordinal: i64,
+    pub source_kind: String,
+    pub title: String,
+    pub content: String,
+    pub path_or_url: Option<String>,
+    pub tags: Vec<String>,
+    pub author: Option<String>,
+    pub category: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextChunk {
+    pub chunk_id: String,
+    pub document_id: String,
+    pub source: String,
+    pub score: f32,
+    pub content: String,
+    pub metadata: HashMap<String, Value>,
 }

@@ -1,679 +1,591 @@
-//! RetrievalService — Week 4 production retrieval layer.
-//!
-//! Implements all six retrieval strategies:
-//!   1. Dense      — Qdrant cosine similarity search on 768-dim embeddings
-//!   2. Sparse     — SQLite FTS5 BM25 keyword search
-//!   3. Hybrid     — Reciprocal Rank Fusion (RRF, k=60) of Dense + Sparse
-//!   4. Faceted    — Dense search with Qdrant payload filters (source, tags, dates)
-//!   5. Contextual — Dense search + surrounding sibling chunk window from SQLite
-//!   6. Recursive  — Dense search on child chunks + parent summary content load
+use std::collections::{HashMap, HashSet};
 
-use std::collections::HashMap;
-use std::time::Instant;
-
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use crate::db::Database;
-use crate::db::repositories::document_repository::FtsChunkHit;
 use crate::domain::{
-    AllStrategiesResult, ContextChunk, RetrievalFilters, RetrievalRequest, RetrievalResponse,
-    RetrievalResult,
+    AssistantResponse, Citation, MetadataFilters, QueryAnalysis, RetrievalResponse,
+    RetrievalStrategy, RetrievedChunk,
 };
+use crate::services::context_builder::{BuiltContext, ContextBuilder};
+use crate::services::groq::GroqService;
 use crate::services::ollama::OllamaService;
-use crate::services::qdrant::{QdrantSearchResult, QdrantService};
+use crate::services::qdrant::{QdrantSearchFilter, QdrantSearchResult, QdrantService};
+use crate::services::query_analyzer::QueryAnalyzerService;
+use crate::services::reranker::RerankerService;
+use crate::services::sparse::SparseRetrievalService;
 
-/// Default number of results when none is specified
-const DEFAULT_LIMIT: usize = 10;
-/// Default context window (chunks on each side) for contextual retrieval
-const DEFAULT_CONTEXT_WINDOW: usize = 2;
-/// RRF constant — controls rank-score smoothing
-const RRF_K: f64 = 60.0;
-
-pub struct RetrievalService;
+#[derive(Clone)]
+pub struct RetrievalService {
+    ollama_service: OllamaService,
+    qdrant_service: QdrantService,
+    sparse_service: SparseRetrievalService,
+    groq_service: GroqService,
+    query_analyzer_service: QueryAnalyzerService,
+    reranker_service: RerankerService,
+    context_builder: ContextBuilder,
+}
 
 impl RetrievalService {
-    /// Unified entry point: dispatches to the correct strategy and returns enriched results.
-    pub async fn retrieve(
-        request: &RetrievalRequest,
-        database: &Database,
-        ollama: &OllamaService,
-        qdrant: &QdrantService,
-    ) -> Result<RetrievalResponse> {
-        let start = Instant::now();
-        let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
-        let strategy = request.strategy.to_lowercase();
-
-        let results = match strategy.as_str() {
-            "dense" => {
-                let vec = Self::embed_query(&request.query, ollama).await?;
-                let hits = qdrant.search_similar_points(vec, limit).await?;
-                Self::hits_to_results(hits, "dense", database)
-            }
-            "sparse" => {
-                let fts_hits = database
-                    .document_repository()
-                    .fts_search_chunks(&request.query, limit)?;
-                Self::fts_hits_to_results(fts_hits, "sparse", database)
-            }
-            "hybrid" => {
-                let vec = Self::embed_query(&request.query, ollama).await?;
-                let dense_hits = qdrant.search_similar_points(vec, limit * 2).await?;
-                let sparse_hits = database
-                    .document_repository()
-                    .fts_search_chunks(&request.query, limit * 2)?;
-                let fused = Self::rrf_fuse(dense_hits, sparse_hits, limit);
-                Self::scored_to_results(fused, "hybrid", database)
-            }
-            "faceted" => {
-                let vec = Self::embed_query(&request.query, ollama).await?;
-                let filter = Self::build_qdrant_filter(request.filters.as_ref());
-                let hits = qdrant.search_with_filter(vec, limit, filter).await?;
-                Self::hits_to_results(hits, "faceted", database)
-            }
-            "contextual" => {
-                let vec = Self::embed_query(&request.query, ollama).await?;
-                let hits = qdrant.search_similar_points(vec, limit).await?;
-                let window = request.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW);
-                Self::contextual_results(hits, window, "contextual", database)
-            }
-            "recursive" => {
-                let vec = Self::embed_query(&request.query, ollama).await?;
-                // Filter to child-level chunks only for precision
-                let child_filter = Some(json!({
-                    "must": [{ "key": "chunk_level", "match": { "value": "child" } }]
-                }));
-                let hits = qdrant.search_with_filter(vec, limit, child_filter).await?;
-                Self::recursive_results(hits, "recursive", database)
-            }
-            other => {
-                return Err(anyhow::anyhow!("Unknown retrieval strategy: '{}'", other));
-            }
-        };
-
-        let latency_ms = start.elapsed().as_millis() as u64;
-
-        Ok(RetrievalResponse {
-            total_results: results.len(),
-            results,
-            strategy_used: strategy,
-            query: request.query.clone(),
-            latency_ms,
-        })
-    }
-
-    /// Runs all six strategies and returns their results for comparison / testing.
-    pub async fn retrieve_all_strategies(
-        query: &str,
-        limit: usize,
-        database: &Database,
-        ollama: &OllamaService,
-        qdrant: &QdrantService,
-    ) -> Result<AllStrategiesResult> {
-        let start = Instant::now();
-
-        let base = |strategy: &str| RetrievalRequest {
-            query: query.to_string(),
-            strategy: strategy.to_string(),
-            limit: Some(limit),
-            filters: None,
-            context_window: Some(DEFAULT_CONTEXT_WINDOW),
-        };
-
-        let dense = Self::retrieve(&base("dense"), database, ollama, qdrant).await
-            .unwrap_or_else(|e| error_response("dense", query, e));
-        let sparse = Self::retrieve(&base("sparse"), database, ollama, qdrant).await
-            .unwrap_or_else(|e| error_response("sparse", query, e));
-        let hybrid = Self::retrieve(&base("hybrid"), database, ollama, qdrant).await
-            .unwrap_or_else(|e| error_response("hybrid", query, e));
-        let faceted = Self::retrieve(&base("faceted"), database, ollama, qdrant).await
-            .unwrap_or_else(|e| error_response("faceted", query, e));
-        let contextual = Self::retrieve(&base("contextual"), database, ollama, qdrant).await
-            .unwrap_or_else(|e| error_response("contextual", query, e));
-        let recursive = Self::retrieve(&base("recursive"), database, ollama, qdrant).await
-            .unwrap_or_else(|e| error_response("recursive", query, e));
-
-        Ok(AllStrategiesResult {
-            query: query.to_string(),
-            dense,
-            sparse,
-            hybrid,
-            faceted,
-            contextual,
-            recursive,
-            total_latency_ms: start.elapsed().as_millis() as u64,
-        })
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Embedding
-    // ─────────────────────────────────────────────────────────────────────────
-
-    async fn embed_query(query: &str, ollama: &OllamaService) -> Result<Vec<f32>> {
-        let mut embeddings = ollama.generate_embeddings(&[query.to_string()]).await?;
-        embeddings
-            .pop()
-            .ok_or_else(|| anyhow::anyhow!("Ollama returned no embedding for query"))
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Result converters
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Converts Qdrant dense hits → RetrievalResult (no extra context)
-    fn hits_to_results(
-        hits: Vec<QdrantSearchResult>,
-        strategy: &str,
-        database: &Database,
-    ) -> Vec<RetrievalResult> {
-        hits.into_iter()
-            .enumerate()
-            .map(|(rank, hit)| {
-                let payload = &hit.payload;
-                let document_id = str_from_payload(payload, "document_id");
-                let (title, source_kind, path_or_url, tags) =
-                    meta_from_payload_or_db(&document_id, payload, database);
-
-                RetrievalResult {
-                    chunk_id: str_from_payload(payload, "chunk_id"),
-                    document_id,
-                    document_title: title,
-                    source_kind,
-                    content: str_from_payload(payload, "content"),
-                    score: hit.score as f64,
-                    rank: rank + 1,
-                    strategy: strategy.to_string(),
-                    context_chunks: Vec::new(),
-                    parent_content: None,
-                    path_or_url,
-                    tags,
-                }
-            })
-            .collect()
-    }
-
-    /// Converts FTS5 sparse hits → RetrievalResult
-    fn fts_hits_to_results(
-        hits: Vec<FtsChunkHit>,
-        strategy: &str,
-        database: &Database,
-    ) -> Vec<RetrievalResult> {
-        // BM25 scores from SQLite FTS5 are negative (more negative = more relevant).
-        // We normalize to [0, 1] range by computing 1/(1 + |score|).
-        let max_abs = hits
-            .iter()
-            .map(|h| h.bm25_score.abs())
-            .fold(0.0_f64, f64::max)
-            .max(1.0);
-
-        hits.into_iter()
-            .enumerate()
-            .map(|(rank, hit)| {
-                let normalized_score = 1.0 - (hit.bm25_score.abs() / max_abs);
-                let (title, source_kind, path_or_url, tags) =
-                    meta_from_db(&hit.document_id, database);
-
-                RetrievalResult {
-                    chunk_id: hit.chunk_id,
-                    document_id: hit.document_id,
-                    document_title: title,
-                    source_kind,
-                    content: hit.content,
-                    score: normalized_score,
-                    rank: rank + 1,
-                    strategy: strategy.to_string(),
-                    context_chunks: Vec::new(),
-                    parent_content: None,
-                    path_or_url,
-                    tags,
-                }
-            })
-            .collect()
-    }
-
-    /// Converts pre-fused (chunk_id, rrf_score) pairs → RetrievalResult
-    fn scored_to_results(
-        scored: Vec<(String, String, f64)>, // (chunk_id, document_id, score)
-        strategy: &str,
-        database: &Database,
-    ) -> Vec<RetrievalResult> {
-        scored
-            .into_iter()
-            .enumerate()
-            .map(|(rank, (chunk_id, document_id, score))| {
-                // Try to load content from DB
-                let content = database
-                    .document_repository()
-                    .get_chunks_by_document(&document_id)
-                    .ok()
-                    .and_then(|chunks| chunks.into_iter().find(|c| c.id == chunk_id))
-                    .map(|c| c.content)
-                    .unwrap_or_default();
-
-                let (title, source_kind, path_or_url, tags) =
-                    meta_from_db(&document_id, database);
-
-                RetrievalResult {
-                    chunk_id,
-                    document_id,
-                    document_title: title,
-                    source_kind,
-                    content,
-                    score,
-                    rank: rank + 1,
-                    strategy: strategy.to_string(),
-                    context_chunks: Vec::new(),
-                    parent_content: None,
-                    path_or_url,
-                    tags,
-                }
-            })
-            .collect()
-    }
-
-    /// Converts Qdrant hits → RetrievalResult with surrounding sibling context
-    fn contextual_results(
-        hits: Vec<QdrantSearchResult>,
-        window: usize,
-        strategy: &str,
-        database: &Database,
-    ) -> Vec<RetrievalResult> {
-        hits.into_iter()
-            .enumerate()
-            .map(|(rank, hit)| {
-                let payload = &hit.payload;
-                let chunk_id = str_from_payload(payload, "chunk_id");
-                let document_id = str_from_payload(payload, "document_id");
-                let primary_content = str_from_payload(payload, "content");
-                let (title, source_kind, path_or_url, tags) =
-                    meta_from_payload_or_db(&document_id, payload, database);
-
-                // Get primary chunk ordinal
-                let ordinal = database
-                    .document_repository()
-                    .get_chunk_ordinal(&chunk_id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
-
-                // Fetch context window
-                let context_chunks = database
-                    .document_repository()
-                    .get_context_chunks(&document_id, ordinal, window)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|c| ContextChunk {
-                        ordinal: c.ordinal,
-                        content: c.content,
-                        is_primary: c.ordinal == ordinal,
-                    })
-                    .collect();
-
-                RetrievalResult {
-                    chunk_id,
-                    document_id,
-                    document_title: title,
-                    source_kind,
-                    content: primary_content,
-                    score: hit.score as f64,
-                    rank: rank + 1,
-                    strategy: strategy.to_string(),
-                    context_chunks,
-                    parent_content: None,
-                    path_or_url,
-                    tags,
-                }
-            })
-            .collect()
-    }
-
-    /// Converts Qdrant child chunk hits → RetrievalResult with parent summary content
-    fn recursive_results(
-        hits: Vec<QdrantSearchResult>,
-        strategy: &str,
-        database: &Database,
-    ) -> Vec<RetrievalResult> {
-        hits.into_iter()
-            .enumerate()
-            .map(|(rank, hit)| {
-                let payload = &hit.payload;
-                let chunk_id = str_from_payload(payload, "chunk_id");
-                let document_id = str_from_payload(payload, "document_id");
-                let primary_content = str_from_payload(payload, "content");
-                let (title, source_kind, path_or_url, tags) =
-                    meta_from_payload_or_db(&document_id, payload, database);
-
-                // Load parent summary content
-                let parent_content = database
-                    .document_repository()
-                    .get_parent_chunk(&chunk_id)
-                    .ok()
-                    .flatten()
-                    .map(|p| p.content);
-
-                RetrievalResult {
-                    chunk_id,
-                    document_id,
-                    document_title: title,
-                    source_kind,
-                    content: primary_content,
-                    score: hit.score as f64,
-                    rank: rank + 1,
-                    strategy: strategy.to_string(),
-                    context_chunks: Vec::new(),
-                    parent_content,
-                    path_or_url,
-                    tags,
-                }
-            })
-            .collect()
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Reciprocal Rank Fusion (RRF)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Fuses dense (Qdrant) and sparse (FTS5) result lists using RRF.
-    ///
-    /// RRF score: Σ 1/(k + rank_i) across all result lists.
-    /// Returns (chunk_id, document_id, rrf_score) sorted descending.
-    fn rrf_fuse(
-        dense_hits: Vec<QdrantSearchResult>,
-        sparse_hits: Vec<FtsChunkHit>,
-        limit: usize,
-    ) -> Vec<(String, String, f64)> {
-        let mut scores: HashMap<String, (String, f64)> = HashMap::new(); // chunk_id -> (doc_id, score)
-
-        // Dense results contribution
-        for (rank, hit) in dense_hits.iter().enumerate() {
-            let chunk_id = str_from_payload(&hit.payload, "chunk_id");
-            let document_id = str_from_payload(&hit.payload, "document_id");
-            let rrf_score = 1.0 / (RRF_K + rank as f64 + 1.0);
-            let entry = scores.entry(chunk_id).or_insert((document_id, 0.0));
-            entry.1 += rrf_score;
+    pub fn new(
+        ollama_service: OllamaService,
+        qdrant_service: QdrantService,
+        sparse_service: SparseRetrievalService,
+        groq_service: GroqService,
+        query_analyzer_service: QueryAnalyzerService,
+        reranker_service: RerankerService,
+        context_builder: ContextBuilder,
+    ) -> Self {
+        Self {
+            ollama_service,
+            qdrant_service,
+            sparse_service,
+            groq_service,
+            query_analyzer_service,
+            reranker_service,
+            context_builder,
         }
+    }
 
-        // Sparse results contribution
-        for (rank, hit) in sparse_hits.iter().enumerate() {
-            let rrf_score = 1.0 / (RRF_K + rank as f64 + 1.0);
-            let entry = scores
-                .entry(hit.chunk_id.clone())
-                .or_insert((hit.document_id.clone(), 0.0));
-            entry.1 += rrf_score;
-        }
-
-        let mut fused: Vec<(String, String, f64)> = scores
+    pub async fn ask_assistant(&self, database: &Database, query: &str) -> Result<AssistantResponse> {
+        let retrieval = self.retrieve_documents(database, query).await?;
+        let reranked_chunks = self
+            .reranker_service
+            .rerank(query, retrieval.results.clone())
+            .await?;
+        let built_context = self.context_builder.build(reranked_chunks.clone());
+        let answer = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
+        let citations = built_context
+            .chunks
             .into_iter()
-            .map(|(chunk_id, (doc_id, score))| (chunk_id, doc_id, score))
+            .map(|chunk| Citation {
+                source: chunk.source,
+                document_id: chunk.document_id,
+                chunk_id: chunk.chunk_id,
+                score: chunk.score,
+            })
             .collect();
 
-        fused.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        fused.truncate(limit);
-        fused
+        Ok(AssistantResponse { answer, citations })
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Qdrant filter builder
-    // ─────────────────────────────────────────────────────────────────────────
+    pub async fn retrieve_documents(
+        &self,
+        database: &Database,
+        query: &str,
+    ) -> Result<RetrievalResponse> {
+        let analysis = self.query_analyzer_service.analyze(database, query).await?;
+        let results = self
+            .retrieve_with_strategy(database, query, &analysis.strategy, &analysis, 0)
+            .await?;
 
-    /// Builds a Qdrant filter JSON from the optional RetrievalFilters struct.
-    fn build_qdrant_filter(filters: Option<&RetrievalFilters>) -> Option<Value> {
-        let Some(f) = filters else {
-            return None;
+        Ok(RetrievalResponse {
+            query: query.to_string(),
+            strategy_used: analysis.strategy.clone(),
+            total_results: results.len(),
+            analysis,
+            results,
+        })
+    }
+
+    pub async fn retrieve_with_strategy(
+        &self,
+        database: &Database,
+        query: &str,
+        strategy: &RetrievalStrategy,
+        analysis: &QueryAnalysis,
+        depth: usize,
+    ) -> Result<Vec<RetrievedChunk>> {
+        match strategy {
+            RetrievalStrategy::Dense => {
+                self.retrieve_dense(database, query, analysis.metadata_filters.as_ref(), 20)
+                    .await
+            }
+            RetrievalStrategy::Sparse => {
+                self.retrieve_sparse(database, query, analysis.metadata_filters.as_ref(), 20)
+                    .await
+            }
+            RetrievalStrategy::Hybrid => self.retrieve_hybrid(database, query, analysis, 30).await,
+            RetrievalStrategy::Faceted => self.retrieve_faceted(database, query, analysis).await,
+            RetrievalStrategy::Contextual => self.retrieve_contextual(database, query, analysis).await,
+            RetrievalStrategy::Recursive => self.retrieve_recursive(database, query, analysis, depth).await,
+        }
+    }
+
+    async fn retrieve_dense(
+        &self,
+        database: &Database,
+        query: &str,
+        filters: Option<&MetadataFilters>,
+        limit: usize,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let query_embeddings = self.ollama_service.generate_embeddings(&[query.to_string()]).await?;
+        let Some(query_vector) = query_embeddings.into_iter().next() else {
+            return Err(anyhow!("query embedding generation returned no vectors"));
         };
 
-        let mut must: Vec<Value> = Vec::new();
+        let filter = filters.and_then(build_qdrant_filter);
+        let results = self
+            .qdrant_service
+            .search_similar_points(query_vector, limit, filter)
+            .await?;
 
-        if let Some(source) = &f.source_kind {
-            if !source.is_empty() {
-                must.push(json!({
-                    "key": "source",
-                    "match": { "value": source }
-                }));
+        self.hydrate_qdrant_results(database, results)
+    }
+
+    async fn retrieve_sparse(
+        &self,
+        database: &Database,
+        query: &str,
+        filters: Option<&MetadataFilters>,
+        limit: usize,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let sparse_hits = self
+            .sparse_service
+            .search(query, filters, limit)
+            .await?;
+        let ordered_chunk_ids = sparse_hits
+            .iter()
+            .map(|hit| hit.chunk_id.clone())
+            .collect::<Vec<_>>();
+        let mut hydrated = hydrate_chunk_ids(database, &ordered_chunk_ids)?;
+        let score_map = sparse_hits
+            .into_iter()
+            .map(|hit| (hit.chunk_id, hit.score))
+            .collect::<HashMap<_, _>>();
+
+        for chunk in &mut hydrated {
+            chunk.score = score_map.get(&chunk.chunk_id).copied().unwrap_or_default();
+        }
+
+        sort_descending(&mut hydrated);
+        Ok(hydrated)
+    }
+
+    async fn retrieve_hybrid(
+        &self,
+        database: &Database,
+        query: &str,
+        analysis: &QueryAnalysis,
+        limit: usize,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let dense = self
+            .retrieve_dense(database, query, analysis.metadata_filters.as_ref(), 20)
+            .await?;
+        let sparse = self
+            .retrieve_sparse(database, query, analysis.metadata_filters.as_ref(), 20)
+            .await?;
+
+        let mut scores = HashMap::<String, f32>::new();
+        let mut chunk_map = HashMap::<String, RetrievedChunk>::new();
+
+        for (rank, chunk) in dense.into_iter().enumerate() {
+            let score = reciprocal_rank_fusion(rank + 1);
+            *scores.entry(chunk.chunk_id.clone()).or_default() += score;
+            chunk_map.entry(chunk.chunk_id.clone()).or_insert(chunk);
+        }
+
+        for (rank, chunk) in sparse.into_iter().enumerate() {
+            let score = reciprocal_rank_fusion(rank + 1);
+            *scores.entry(chunk.chunk_id.clone()).or_default() += score;
+            chunk_map.entry(chunk.chunk_id.clone()).or_insert(chunk);
+        }
+
+        let mut merged = chunk_map
+            .into_iter()
+            .map(|(chunk_id, mut chunk)| {
+                chunk.score = scores.get(&chunk_id).copied().unwrap_or_default();
+                chunk
+            })
+            .collect::<Vec<_>>();
+
+        sort_descending(&mut merged);
+        merged.truncate(limit);
+        Ok(merged)
+    }
+
+    async fn retrieve_faceted(
+        &self,
+        database: &Database,
+        query: &str,
+        analysis: &QueryAnalysis,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let mut results = self.retrieve_hybrid(database, query, analysis, 30).await?;
+        results.retain(|chunk| matches_filters(chunk, &analysis.metadata_filters));
+        Ok(results)
+    }
+
+    async fn retrieve_contextual(
+        &self,
+        database: &Database,
+        query: &str,
+        analysis: &QueryAnalysis,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let mut results = self.retrieve_hybrid(database, query, analysis, 30).await?;
+        let now = Utc::now();
+
+        for chunk in &mut results {
+            if let Some(modified_at) = chunk.modified_at.as_deref() {
+                if let Ok(parsed) = DateTime::parse_from_rfc3339(modified_at) {
+                    let days = now
+                        .signed_duration_since(parsed.with_timezone(&Utc))
+                        .num_days()
+                        .max(0) as i32;
+                    chunk.score *= 0.95_f32.powi(days);
+                }
+            }
+
+            if is_upcoming_event(&chunk.metadata) {
+                chunk.score *= 2.0;
             }
         }
 
-        if let Some(tags) = &f.tags {
-            for tag in tags {
-                must.push(json!({
-                    "key": "tags",
-                    "match": { "value": tag }
-                }));
+        sort_descending(&mut results);
+        Ok(results)
+    }
+
+    async fn retrieve_recursive(
+        &self,
+        database: &Database,
+        query: &str,
+        analysis: &QueryAnalysis,
+        depth: usize,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let mut accumulated = self.retrieve_hybrid(database, query, analysis, 20).await?;
+        let mut seen_queries = HashSet::from([query.to_string()]);
+        let mut hop = depth;
+
+        while hop < 3 {
+            let follow_up_questions = self
+                .generate_follow_up_questions(query, &accumulated)
+                .await
+                .unwrap_or_default();
+
+            if follow_up_questions.is_empty() {
+                break;
             }
+
+            let mut found_new_query = false;
+            for sub_query in follow_up_questions.into_iter().take(3) {
+                if !seen_queries.insert(sub_query.clone()) {
+                    continue;
+                }
+                found_new_query = true;
+                let sub_results = self.retrieve_hybrid(database, &sub_query, analysis, 10).await?;
+                accumulated.extend(sub_results);
+            }
+
+            if !found_new_query {
+                break;
+            }
+
+            deduplicate_chunks(&mut accumulated);
+            sort_descending(&mut accumulated);
+            accumulated = self.reranker_service.rerank(query, accumulated).await?;
+            hop += 1;
         }
 
-        if let Some(date_after) = &f.date_after {
-            must.push(json!({
-                "key": "created_at",
-                "range": { "gte": date_after }
-            }));
-        }
+        Ok(accumulated)
+    }
 
-        if let Some(date_before) = &f.date_before {
-            must.push(json!({
-                "key": "created_at",
-                "range": { "lte": date_before }
-            }));
-        }
+    async fn generate_follow_up_questions(
+        &self,
+        query: &str,
+        retrieved_chunks: &[RetrievedChunk],
+    ) -> Result<Vec<String>> {
+        let snippet = retrieved_chunks
+            .iter()
+            .take(6)
+            .map(|chunk| format!("{}: {}", chunk.document_title, chunk.content))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        if must.is_empty() {
-            None
+        let system_prompt = "Generate follow-up retrieval questions needed to answer the original user query. Return strict JSON in the shape {\"questions\": [\"...\"]}. Return at most 3 concise questions.";
+        let user_prompt = format!(
+            "Original query: {query}\nRetrieved evidence:\n{snippet}\nReturn strict JSON."
+        );
+        let value = self.groq_service.chat_json(system_prompt, &user_prompt).await?;
+        Ok(value
+            .get("questions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|question| !question.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    async fn generate_answer(
+        &self,
+        query: &str,
+        analysis: &QueryAnalysis,
+        context: &BuiltContext,
+    ) -> Result<String> {
+        let system_prompt = "You are Assistant Core. Answer using only the supplied grounded context. If the context is insufficient, say so clearly. Do not invent citations. Keep the answer concise but helpful.";
+        let user_prompt = format!(
+            "User query: {query}\nStrategy: {:?}\nGrounded context:\n{}\nProvide the final answer only.",
+            analysis.strategy,
+            context.context_text
+        );
+        self.groq_service.chat_text(system_prompt, &user_prompt).await
+    }
+
+    pub async fn initialize(&self, database: &Database) -> Result<()> {
+        self.ensure_groq_ready()?;
+        self.sparse_service.initialize().await?;
+        let documents = database.document_repository().list_all_chunk_search_documents()?;
+        self.sparse_service.rebuild_index(&documents).await?;
+        self.reranker_service.initialize().await?;
+        Ok(())
+    }
+
+    pub async fn clear_sparse_index(&self) -> Result<()> {
+        self.sparse_service.clear_index().await
+    }
+
+    fn hydrate_qdrant_results(
+        &self,
+        database: &Database,
+        results: Vec<QdrantSearchResult>,
+    ) -> Result<Vec<RetrievedChunk>> {
+        let ordered_chunk_ids = results.iter().map(|result| result.id.clone()).collect::<Vec<_>>();
+        let mut hydrated = hydrate_chunk_ids(database, &ordered_chunk_ids)?;
+        let score_map = results
+            .into_iter()
+            .map(|result| (result.id, result.score))
+            .collect::<HashMap<_, _>>();
+
+        for chunk in &mut hydrated {
+            chunk.score = score_map.get(&chunk.chunk_id).copied().unwrap_or_default();
+        }
+        sort_descending(&mut hydrated);
+        Ok(hydrated)
+    }
+}
+
+impl RetrievalService {
+    fn ensure_groq_ready(&self) -> Result<()> {
+        if self.groq_service.is_configured() {
+            Ok(())
         } else {
-            Some(json!({ "must": must }))
+            Err(anyhow!("GROQ_API_KEY is not configured"))
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility helpers
-// ─────────────────────────────────────────────────────────────────────────────
+fn hydrate_chunk_ids(database: &Database, ordered_chunk_ids: &[String]) -> Result<Vec<RetrievedChunk>> {
+    let rows = database
+        .document_repository()
+        .get_chunk_search_documents_by_ids(ordered_chunk_ids)?;
+    let row_map = rows
+        .into_iter()
+        .map(|row| (row.chunk_id.clone(), row))
+        .collect::<HashMap<_, _>>();
 
-fn str_from_payload(payload: &Value, key: &str) -> String {
-    payload[key]
-        .as_str()
-        .unwrap_or_default()
-        .to_string()
+    let mut hydrated = Vec::new();
+    for chunk_id in ordered_chunk_ids {
+        if let Some(row) = row_map.get(chunk_id) {
+            hydrated.push(RetrievedChunk {
+                chunk_id: row.chunk_id.clone(),
+                document_id: row.document_id.clone(),
+                source: row.source_kind.clone(),
+                document_title: row.title.clone(),
+                content: row.content.clone(),
+                score: 0.0,
+                ordinal: row.ordinal,
+                path_or_url: row.path_or_url.clone(),
+                tags: row.tags.clone(),
+                author: row.author.clone(),
+                category: row.category.clone(),
+                created_at: row.created_at.clone(),
+                modified_at: row.updated_at.clone(),
+                metadata: row.metadata.clone(),
+            });
+        }
+    }
+
+    Ok(hydrated)
 }
 
-/// Tries to get document meta from the Qdrant payload first, then falls back to SQLite.
-fn meta_from_payload_or_db(
-    document_id: &str,
-    payload: &Value,
-    database: &Database,
-) -> (String, String, Option<String>, Vec<String>) {
-    let title = payload["title"].as_str().map(|s| s.to_string());
-    let source = payload["source"].as_str().map(|s| s.to_string());
-    let path = payload["path_or_url"].as_str().map(|s| s.to_string());
-    let tags: Vec<String> = payload["tags"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+fn reciprocal_rank_fusion(rank: usize) -> f32 {
+    1.0 / (60.0 + rank as f32)
+}
 
-    if title.is_some() && source.is_some() {
-        (
-            title.unwrap(),
-            source.unwrap(),
-            path,
-            tags,
-        )
+fn sort_descending(chunks: &mut [RetrievedChunk]) {
+    chunks.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn deduplicate_chunks(chunks: &mut Vec<RetrievedChunk>) {
+    let mut seen = HashSet::new();
+    chunks.retain(|chunk| seen.insert(chunk.chunk_id.clone()));
+}
+
+fn build_qdrant_filter(filters: &MetadataFilters) -> Option<QdrantSearchFilter> {
+    let mut must = Vec::new();
+
+    if let Some(sources) = &filters.source {
+        must.push(json!({
+            "key": "source",
+            "match": { "any": sources }
+        }));
+    }
+
+    if let Some(authors) = &filters.author {
+        let lowered: Vec<String> = authors.iter().map(|s| s.to_lowercase()).collect();
+        must.push(json!({
+            "key": "author",
+            "match": { "any": lowered }
+        }));
+    }
+
+    if let Some(tags) = &filters.tags {
+        let lowered: Vec<String> = tags.iter().map(|s| s.to_lowercase()).collect();
+        must.push(json!({
+            "key": "tags",
+            "match": { "any": lowered }
+        }));
+    }
+
+    if let Some(categories) = &filters.category {
+        let lowered: Vec<String> = categories.iter().map(|s| s.to_lowercase()).collect();
+        must.push(json!({
+            "key": "category",
+            "match": { "any": lowered }
+        }));
+    }
+
+    if let Some(date_range) = &filters.date_range {
+        if date_range.from.is_some() || date_range.to.is_some() {
+            let mut range = serde_json::Map::new();
+            if let Some(from) = &date_range.from {
+                range.insert("gte".to_string(), Value::String(from.clone()));
+            }
+            if let Some(to) = &date_range.to {
+                range.insert("lte".to_string(), Value::String(to.clone()));
+            }
+            must.push(json!({
+                "key": "modified_at",
+                "range": Value::Object(range),
+            }));
+        }
+    }
+
+    if must.is_empty() {
+        None
     } else {
-        meta_from_db(document_id, database)
+        Some(QdrantSearchFilter {
+            must,
+            should: Vec::new(),
+            must_not: Vec::new(),
+        })
     }
 }
 
-fn meta_from_db(
-    document_id: &str,
-    database: &Database,
-) -> (String, String, Option<String>, Vec<String>) {
-    database
-        .document_repository()
-        .get_document_meta(document_id)
-        .ok()
-        .flatten()
-        .map(|(title, source, path, tags)| (title, source, path, tags))
-        .unwrap_or_else(|| (
-            "Unknown Document".to_string(),
-            "unknown".to_string(),
-            None,
-            Vec::new(),
-        ))
+fn matches_filters(chunk: &RetrievedChunk, filters: &MetadataFilters) -> bool {
+    if let Some(sources) = &filters.source {
+        if !sources
+            .iter()
+            .any(|source| source.eq_ignore_ascii_case(&chunk.source))
+        {
+            return false;
+        }
+    }
+
+    if let Some(authors) = &filters.author {
+        let Some(author) = &chunk.author else {
+            return false;
+        };
+        if !authors
+            .iter()
+            .any(|candidate| author.to_lowercase().contains(&candidate.to_lowercase()))
+        {
+            return false;
+        }
+    }
+
+    if let Some(tags) = &filters.tags {
+        if !tags.iter().any(|required| {
+            chunk
+                .tags
+                .iter()
+                .any(|tag| tag.to_lowercase().contains(&required.to_lowercase()))
+        }) {
+            return false;
+        }
+    }
+
+    if let Some(categories) = &filters.category {
+        let Some(category) = &chunk.category else {
+            return false;
+        };
+        if !categories.iter().any(|value| {
+            category
+                .to_lowercase()
+                .contains(&value.to_lowercase())
+        }) {
+            return false;
+        }
+    }
+
+    if let Some(date_range) = &filters.date_range {
+        let date = chunk
+            .modified_at
+            .as_deref()
+            .or(chunk.created_at.as_deref())
+            .unwrap_or_default();
+        if let Some(from) = &date_range.from {
+            if date < from.as_str() {
+                return false;
+            }
+        }
+        if let Some(to) = &date_range.to {
+            if date > to.as_str() {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
-fn error_response(strategy: &str, query: &str, err: anyhow::Error) -> RetrievalResponse {
-    tracing::error!("Strategy '{}' failed for query '{}': {}", strategy, query, err);
-    RetrievalResponse {
-        results: Vec::new(),
-        strategy_used: strategy.to_string(),
-        total_results: 0,
-        query: query.to_string(),
-        latency_ms: 0,
+fn is_upcoming_event(metadata: &Value) -> bool {
+    metadata
+        .get("is_upcoming_event")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            metadata
+                .get("upcoming")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+}
+
+trait MetadataFiltersExt {
+    fn as_ref(&self) -> Option<&MetadataFilters>;
+}
+
+impl MetadataFiltersExt for MetadataFilters {
+    fn as_ref(&self) -> Option<&MetadataFilters> {
+        Some(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
-    use crate::db::Database;
-    use crate::services::ollama::OllamaService;
-    use crate::services::qdrant::QdrantService;
 
-    #[tokio::test]
-    async fn test_all_six_retrieval_strategies() {
-        // Load configurations
-        let config = match AppConfig::load() {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Failed to load configuration, skipping integration test: {}", e);
-                return;
-            }
-        };
-
-        // Open database connection
-        let database = match Database::connect(&config.database_path) {
-            Ok(db) => db,
-            Err(e) => {
-                println!("Failed to connect to SQLite, skipping integration test: {}", e);
-                return;
-            }
-        };
-
-        // Run migrations
-        if let Err(e) = database.run_migrations() {
-            println!("Failed to run migrations: {}", e);
-            return;
-        }
-
-        let ollama = OllamaService::new(config.ollama_url.clone(), config.embedding_model.clone());
-        let qdrant = QdrantService::new(config.qdrant_url.clone(), config.qdrant_collection.clone());
-
-        // Perform semantic retrieval check to verify Qdrant connectivity
-        if let Err(e) = qdrant.initialize_collection().await {
-            println!("Qdrant is not running or failed to initialize, skipping test: {}", e);
-            return;
-        }
-
-        let query = "RAG vector databases and embeddings";
-
-        println!("--- Starting Strategy Integration Testing ---");
-
-        // 1. Dense Strategy
-        let req_dense = RetrievalRequest {
-            query: query.to_string(),
-            strategy: "dense".to_string(),
-            limit: Some(3),
-            filters: None,
-            context_window: None,
-        };
-        let res_dense = RetrievalService::retrieve(&req_dense, &database, &ollama, &qdrant)
-            .await
-            .expect("Dense retrieval failed");
-        assert_eq!(res_dense.strategy_used, "dense");
-        println!("✅ Dense strategy retrieved {} results", res_dense.results.len());
-
-        // 2. Sparse Strategy (FTS5)
-        let req_sparse = RetrievalRequest {
-            query: query.to_string(),
-            strategy: "sparse".to_string(),
-            limit: Some(3),
-            filters: None,
-            context_window: None,
-        };
-        let res_sparse = RetrievalService::retrieve(&req_sparse, &database, &ollama, &qdrant)
-            .await
-            .expect("Sparse retrieval failed");
-        assert_eq!(res_sparse.strategy_used, "sparse");
-        println!("✅ Sparse strategy retrieved {} results", res_sparse.results.len());
-
-        // 3. Hybrid Strategy (RRF)
-        let req_hybrid = RetrievalRequest {
-            query: query.to_string(),
-            strategy: "hybrid".to_string(),
-            limit: Some(3),
-            filters: None,
-            context_window: None,
-        };
-        let res_hybrid = RetrievalService::retrieve(&req_hybrid, &database, &ollama, &qdrant)
-            .await
-            .expect("Hybrid retrieval failed");
-        assert_eq!(res_hybrid.strategy_used, "hybrid");
-        println!("✅ Hybrid strategy retrieved {} results", res_hybrid.results.len());
-
-        // 4. Faceted Strategy
-        let filters = RetrievalFilters {
-            source_kind: Some("obsidian".to_string()),
-            tags: None,
-            date_after: None,
-            date_before: None,
-        };
-        let req_faceted = RetrievalRequest {
-            query: query.to_string(),
-            strategy: "faceted".to_string(),
-            limit: Some(3),
-            filters: Some(filters),
-            context_window: None,
-        };
-        let res_faceted = RetrievalService::retrieve(&req_faceted, &database, &ollama, &qdrant)
-            .await
-            .expect("Faceted retrieval failed");
-        assert_eq!(res_faceted.strategy_used, "faceted");
-        for hit in &res_faceted.results {
-            assert_eq!(hit.source_kind, "obsidian");
-        }
-        println!("✅ Faceted strategy retrieved {} results, all source_kind = obsidian", res_faceted.results.len());
-
-        // 5. Contextual Strategy
-        let req_contextual = RetrievalRequest {
-            query: query.to_string(),
-            strategy: "contextual".to_string(),
-            limit: Some(3),
-            filters: None,
-            context_window: Some(2),
-        };
-        let res_contextual = RetrievalService::retrieve(&req_contextual, &database, &ollama, &qdrant)
-            .await
-            .expect("Contextual retrieval failed");
-        assert_eq!(res_contextual.strategy_used, "contextual");
-        println!("✅ Contextual strategy retrieved {} results", res_contextual.results.len());
-
-        // 6. Recursive Strategy
-        let req_recursive = RetrievalRequest {
-            query: query.to_string(),
-            strategy: "recursive".to_string(),
-            limit: Some(3),
-            filters: None,
-            context_window: None,
-        };
-        let res_recursive = RetrievalService::retrieve(&req_recursive, &database, &ollama, &qdrant)
-            .await
-            .expect("Recursive retrieval failed");
-        assert_eq!(res_recursive.strategy_used, "recursive");
-        println!("✅ Recursive strategy retrieved {} results", res_recursive.results.len());
-        
-        println!("--- All 6 Strategies Verified Successfully! ---");
+    #[test]
+    fn reciprocal_rank_fusion_uses_exact_formula() {
+        let score = reciprocal_rank_fusion(1);
+        assert!((score - (1.0 / 61.0)).abs() < f32::EPSILON);
     }
 }

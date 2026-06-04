@@ -1,6 +1,6 @@
-# ─── Node ────────────────────────────────────────────────────
 node_modules
 dist
+.DS_Store
 .turbo
 .vite
 coverage
@@ -8,29 +8,18 @@ apps/desktop/dist
 apps/desktop/node_modules
 apps/desktop/src/**/*.js
 packages/shared/dist
-
-# ─── Rust / Tauri ────────────────────────────────────────────
 src-tauri/target
 src-tauri/gen
 src-tauri/.cargo
-
-# ─── Env / Secrets ───────────────────────────────────────────
+*.log
 .env
 .env.local
 .env.*.local
 src-tauri/.env
-
-# ─── Database files ──────────────────────────────────────────
+tmp
 *.db
-*.db-shm
-*.db-wal
+assistant.db
+T_AI_Personal_Assistant_MVP.pdf
+scratch/
+stitch_omni_workspace_os/
 *.sqbpro
-
-# ─── OS / Editor artefacts ───────────────────────────────────
-.DS_Store
-Thumbs.db
-*.log
-tmp/
-
-# ─── Docs / Reference (large binaries) ──────────────────────
-docs/*.pdf

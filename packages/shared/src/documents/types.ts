@@ -32,8 +32,6 @@ export const chunkRecordSchema = z.object({
   content: z.string(),
   tokenCount: z.number().int().nonnegative(),
   embeddingStatus: z.enum(['pending', 'completed', 'failed']),
-  chunkLevel: z.enum(['standard', 'parent', 'child']).default('standard'),
-  parentChunkId: z.string().nullable(),
 });
 
 export type SourceKind = z.infer<typeof sourceKindSchema>;
@@ -48,77 +46,78 @@ export const qdrantSearchResultSchema = z.object({
 
 export type QdrantSearchResult = z.infer<typeof qdrantSearchResultSchema>;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Week 4 — Retrieval Layer Types
-// ─────────────────────────────────────────────────────────────────────────────
+export const metadataDateRangeSchema = z.object({
+  from: z.string().nullable().optional(),
+  to: z.string().nullable().optional(),
+});
+
+export const metadataFiltersSchema = z.object({
+  source: z.array(z.string()).nullable().optional(),
+  author: z.array(z.string()).nullable().optional(),
+  tags: z.array(z.string()).nullable().optional(),
+  category: z.array(z.string()).nullable().optional(),
+  dateRange: metadataDateRangeSchema.nullable().optional(),
+});
 
 export const retrievalStrategySchema = z.enum([
-  'dense',
-  'sparse',
-  'hybrid',
-  'faceted',
-  'contextual',
-  'recursive',
+  'DENSE',
+  'SPARSE',
+  'HYBRID',
+  'FACETED',
+  'CONTEXTUAL',
+  'RECURSIVE',
 ]);
-export type RetrievalStrategy = z.infer<typeof retrievalStrategySchema>;
 
-export const retrievalFiltersSchema = z.object({
-  sourceKind: z.string().nullable().optional(),
-  tags: z.array(z.string()).nullable().optional(),
-  dateAfter: z.string().nullable().optional(),
-  dateBefore: z.string().nullable().optional(),
-});
-export type RetrievalFilters = z.infer<typeof retrievalFiltersSchema>;
+export const queryComplexitySchema = z.enum(['simple', 'complex']);
 
-export const retrievalRequestSchema = z.object({
-  query: z.string(),
+export const queryAnalysisSchema = z.object({
+  intent: z.string(),
+  entities: z.array(z.string()),
+  metadataFilters: metadataFiltersSchema,
+  temporal: z.boolean(),
+  complexity: queryComplexitySchema,
   strategy: retrievalStrategySchema,
-  limit: z.number().int().positive().nullable().optional(),
-  filters: retrievalFiltersSchema.nullable().optional(),
-  contextWindow: z.number().int().nonnegative().nullable().optional(),
 });
-export type RetrievalRequest = z.infer<typeof retrievalRequestSchema>;
 
-export const contextChunkSchema = z.object({
-  ordinal: z.number().int(),
-  content: z.string(),
-  isPrimary: z.boolean(),
-});
-export type ContextChunk = z.infer<typeof contextChunkSchema>;
-
-export const retrievalResultSchema = z.object({
+export const retrievedChunkSchema = z.object({
   chunkId: z.string(),
   documentId: z.string(),
+  source: z.string(),
   documentTitle: z.string(),
-  sourceKind: z.string(),
   content: z.string(),
   score: z.number(),
-  rank: z.number().int().positive(),
-  strategy: z.string(),
-  contextChunks: z.array(contextChunkSchema).default([]),
-  parentContent: z.string().nullable(),
+  ordinal: z.number().int(),
   pathOrUrl: z.string().nullable(),
-  tags: z.array(z.string()).default([]),
+  tags: z.array(z.string()),
+  author: z.string().nullable(),
+  category: z.string().nullable(),
+  createdAt: z.string().nullable(),
+  modifiedAt: z.string().nullable(),
+  metadata: z.record(z.string(), z.unknown()),
 });
-export type RetrievalResult = z.infer<typeof retrievalResultSchema>;
 
 export const retrievalResponseSchema = z.object({
-  results: z.array(retrievalResultSchema),
-  strategyUsed: z.string(),
+  query: z.string(),
+  strategyUsed: retrievalStrategySchema,
+  analysis: queryAnalysisSchema,
+  results: z.array(retrievedChunkSchema),
   totalResults: z.number().int().nonnegative(),
-  query: z.string(),
-  latencyMs: z.number().int().nonnegative(),
 });
-export type RetrievalResponse = z.infer<typeof retrievalResponseSchema>;
 
-export const allStrategiesResultSchema = z.object({
-  query: z.string(),
-  dense: retrievalResponseSchema,
-  sparse: retrievalResponseSchema,
-  hybrid: retrievalResponseSchema,
-  faceted: retrievalResponseSchema,
-  contextual: retrievalResponseSchema,
-  recursive: retrievalResponseSchema,
-  totalLatencyMs: z.number().int().nonnegative(),
+export const citationSchema = z.object({
+  source: z.string(),
+  documentId: z.string(),
+  chunkId: z.string(),
+  score: z.number(),
 });
-export type AllStrategiesResult = z.infer<typeof allStrategiesResultSchema>;
+
+export const assistantResponseSchema = z.object({
+  answer: z.string(),
+  citations: z.array(citationSchema),
+});
+
+export type QueryAnalysis = z.infer<typeof queryAnalysisSchema>;
+export type RetrievedChunk = z.infer<typeof retrievedChunkSchema>;
+export type RetrievalResponse = z.infer<typeof retrievalResponseSchema>;
+export type Citation = z.infer<typeof citationSchema>;
+export type AssistantResponse = z.infer<typeof assistantResponseSchema>;

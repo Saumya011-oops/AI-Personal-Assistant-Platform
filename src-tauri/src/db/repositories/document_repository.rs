@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
-use crate::domain::{DocumentChunk, NormalizedDocument};
+use crate::domain::{ChunkSearchDocument, DocumentChunk, MetadataFilters, NormalizedDocument};
 
 #[derive(Clone)]
 pub struct DocumentRepository {
@@ -125,15 +125,11 @@ impl DocumentRepository {
         Ok(rows)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Chunk persistence (standard)
-    // ─────────────────────────────────────────────────────────────────────────
-
     pub fn save_chunks(&self, document_id: &str, chunks: &[DocumentChunk]) -> Result<()> {
         let mut connection = self.connection.lock().expect("db lock poisoned");
         let transaction = connection.transaction()?;
 
-        // Delete existing chunks for this document first (cascades to FTS via trigger)
+        // Delete existing chunks for this document first
         transaction.execute(
             "DELETE FROM chunks WHERE document_id = ?1",
             params![document_id],
@@ -142,8 +138,8 @@ impl DocumentRepository {
         // Insert new chunks
         for chunk in chunks {
             transaction.execute(
-                "INSERT INTO chunks (id, document_id, ordinal, content, token_count, embedding_status, chunk_level, parent_chunk_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO chunks (id, document_id, ordinal, content, token_count, embedding_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     chunk.id,
                     chunk.document_id,
@@ -151,8 +147,6 @@ impl DocumentRepository {
                     chunk.content,
                     chunk.token_count,
                     chunk.embedding_status,
-                    chunk.chunk_level,
-                    chunk.parent_chunk_id,
                 ],
             )?;
         }
@@ -161,20 +155,59 @@ impl DocumentRepository {
         Ok(())
     }
 
-    /// Saves a hierarchical (recursive) chunk set.
-    /// Parents must be inserted before children to satisfy the FK constraint.
-    /// The `chunks` Vec is expected to be ordered: parents first, then children.
-    pub fn save_chunks_recursive(&self, document_id: &str, chunks: &[DocumentChunk]) -> Result<()> {
-        // The chunks already arrive ordered (parents before children) from RecursiveChunker.
-        // We can reuse save_chunks since the INSERT statement now includes the new columns.
-        self.save_chunks(document_id, chunks)
+    pub fn sync_chunk_search_index(
+        &self,
+        document: &NormalizedDocument,
+        chunks: &[DocumentChunk],
+    ) -> Result<()> {
+        let mut connection = self.connection.lock().expect("db lock poisoned");
+        let transaction = connection.transaction()?;
+
+        transaction.execute(
+            "DELETE FROM chunk_fts WHERE document_id = ?1",
+            params![document.id],
+        )?;
+
+        let author = document
+            .metadata
+            .get("author")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let category = document
+            .metadata
+            .get("category")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let tags = document.tags.join(" ");
+
+        for chunk in chunks {
+            transaction.execute(
+                "INSERT INTO chunk_fts (
+                    chunk_id, document_id, source, title, content, tags, author, category, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    chunk.id,
+                    document.id,
+                    document.source_kind,
+                    document.title,
+                    chunk.content,
+                    tags,
+                    author,
+                    category,
+                    document.created_at,
+                    document.updated_at,
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn get_chunks_by_document(&self, document_id: &str) -> Result<Vec<DocumentChunk>> {
         let connection = self.connection.lock().expect("db lock poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, document_id, ordinal, content, token_count, embedding_status,
-                    chunk_level, parent_chunk_id, created_at
+            "SELECT id, document_id, ordinal, content, token_count, embedding_status, created_at
              FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC",
         )?;
         let rows = statement.query_map(params![document_id], |row| {
@@ -185,9 +218,7 @@ impl DocumentRepository {
                 content: row.get(3)?,
                 token_count: row.get(4)?,
                 embedding_status: row.get(5)?,
-                chunk_level: row.get(6)?,
-                parent_chunk_id: row.get(7)?,
-                created_at: row.get(8)?,
+                created_at: row.get(6)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -197,8 +228,7 @@ impl DocumentRepository {
     pub fn get_pending_chunks(&self) -> Result<Vec<DocumentChunk>> {
         let connection = self.connection.lock().expect("db lock poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, document_id, ordinal, content, token_count, embedding_status,
-                    chunk_level, parent_chunk_id, created_at
+            "SELECT id, document_id, ordinal, content, token_count, embedding_status, created_at
              FROM chunks WHERE embedding_status = 'pending'",
         )?;
         let rows = statement.query_map([], |row| {
@@ -209,9 +239,7 @@ impl DocumentRepository {
                 content: row.get(3)?,
                 token_count: row.get(4)?,
                 embedding_status: row.get(5)?,
-                chunk_level: row.get(6)?,
-                parent_chunk_id: row.get(7)?,
-                created_at: row.get(8)?,
+                created_at: row.get(6)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -229,215 +257,249 @@ impl DocumentRepository {
     pub fn clear_all_documents(&self) -> Result<()> {
         let connection = self.connection.lock().expect("db lock poisoned");
         connection.execute("DELETE FROM documents", [])?;
+        connection.execute("DELETE FROM chunk_fts", [])?;
         connection.execute("UPDATE integrations SET last_synced_at = NULL, detail = NULL, status = 'connected'", [])?;
         connection.execute("DELETE FROM sync_state", [])?;
         Ok(())
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Week 4 — Sparse / BM25 Retrieval via FTS5
-    // ─────────────────────────────────────────────────────────────────────────
+    pub fn get_chunk_search_documents_by_ids(
+        &self,
+        chunk_ids: &[String],
+    ) -> Result<Vec<ChunkSearchDocument>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
 
-    /// Performs BM25-ranked full-text search over chunk contents using SQLite FTS5.
-    /// Returns a list of (chunk_id, document_id, bm25_rank) tuples ordered by rank
-    /// (lower rank = more relevant for FTS5's BM25 scoring).
-    pub fn fts_search_chunks(
+        let connection = self.connection.lock().expect("db lock poisoned");
+        let placeholders = (0..chunk_ids.len())
+            .map(|_| "?".to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT
+                c.id,
+                c.document_id,
+                c.ordinal,
+                d.source_kind,
+                d.title,
+                c.content,
+                d.path_or_url,
+                d.tags_json,
+                d.metadata_json,
+                d.created_at,
+                d.updated_at
+             FROM chunks c
+             JOIN documents d ON d.id = c.document_id
+             WHERE c.id IN ({placeholders})"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk_ids.iter()), |row| {
+            let tags_json: String = row.get(7)?;
+            let metadata_json: String = row.get(8)?;
+            let metadata: serde_json::Value =
+                serde_json::from_str(&metadata_json).unwrap_or(serde_json::json!({}));
+            Ok(ChunkSearchDocument {
+                chunk_id: row.get(0)?,
+                document_id: row.get(1)?,
+                ordinal: row.get(2)?,
+                source_kind: row.get(3)?,
+                title: row.get(4)?,
+                content: row.get(5)?,
+                path_or_url: row.get(6)?,
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                author: metadata
+                    .get("author")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                category: metadata
+                    .get("category")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                metadata,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn list_all_chunk_search_documents(&self) -> Result<Vec<ChunkSearchDocument>> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        let mut statement = connection.prepare(
+            "SELECT
+                c.id,
+                c.document_id,
+                c.ordinal,
+                d.source_kind,
+                d.title,
+                c.content,
+                d.path_or_url,
+                d.tags_json,
+                d.metadata_json,
+                d.created_at,
+                d.updated_at
+             FROM chunks c
+             JOIN documents d ON d.id = c.document_id
+             ORDER BY d.id, c.ordinal ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let tags_json: String = row.get(7)?;
+            let metadata_json: String = row.get(8)?;
+            let metadata: serde_json::Value =
+                serde_json::from_str(&metadata_json).unwrap_or(serde_json::json!({}));
+            Ok(ChunkSearchDocument {
+                chunk_id: row.get(0)?,
+                document_id: row.get(1)?,
+                ordinal: row.get(2)?,
+                source_kind: row.get(3)?,
+                title: row.get(4)?,
+                content: row.get(5)?,
+                path_or_url: row.get(6)?,
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                author: metadata
+                    .get("author")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                category: metadata
+                    .get("category")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                metadata,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn search_chunks_bm25(
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<FtsChunkHit>> {
+        filters: Option<&MetadataFilters>,
+    ) -> Result<Vec<(String, f32)>> {
         let connection = self.connection.lock().expect("db lock poisoned");
+        let safe_query = query
+            .split_whitespace()
+            .map(|token| token.replace('"', ""))
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
 
-        // Sanitize the query for FTS5: escape special chars and handle bare terms
-        let safe_query = sanitize_fts_query(query);
         if safe_query.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut stmt = connection.prepare(
-            "SELECT chunk_id, document_id, bm25(chunks_fts) AS rank, content
-             FROM chunks_fts
-             WHERE chunks_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )?;
+        let mut sql = String::from(
+            "SELECT f.chunk_id, bm25(chunk_fts) AS score
+             FROM chunk_fts f
+             JOIN documents d ON d.id = f.document_id
+             WHERE chunk_fts MATCH ?1",
+        );
+        let mut params_vec: Vec<String> = vec![safe_query];
 
-        let rows = stmt.query_map(params![safe_query, limit as i64], |row| {
-            Ok(FtsChunkHit {
-                chunk_id: row.get(0)?,
-                document_id: row.get(1)?,
-                bm25_score: row.get::<_, f64>(2)?,
-                content: row.get(3)?,
-            })
+        if let Some(filters) = filters {
+            if let Some(source) = &filters.source {
+                let placeholders = source
+                    .iter()
+                    .map(|_| "?".to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" AND LOWER(d.source_kind) IN ({placeholders})"));
+                params_vec.extend(source.iter().map(|s| s.to_lowercase()));
+            }
+            if let Some(authors) = &filters.author {
+                let clauses = authors
+                    .iter()
+                    .map(|_| "LOWER(json_extract(d.metadata_json, '$.author')) LIKE ?".to_string())
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                sql.push_str(&format!(" AND ({clauses})"));
+                params_vec.extend(authors.iter().map(|s| format!("%{}%", s.to_lowercase())));
+            }
+            if let Some(tags) = &filters.tags {
+                let clauses = tags
+                    .iter()
+                    .map(|_| "LOWER(d.tags_json) LIKE ?".to_string())
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                sql.push_str(&format!(" AND ({clauses})"));
+                params_vec.extend(tags.iter().map(|s| format!("%{}%", s.to_lowercase())));
+            }
+            if let Some(categories) = &filters.category {
+                let clauses = categories
+                    .iter()
+                    .map(|_| "LOWER(json_extract(d.metadata_json, '$.category')) LIKE ?".to_string())
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                sql.push_str(&format!(" AND ({clauses})"));
+                params_vec.extend(categories.iter().map(|s| format!("%{}%", s.to_lowercase())));
+            }
+            if let Some(date_range) = &filters.date_range {
+                if let Some(from) = &date_range.from {
+                    sql.push_str(" AND COALESCE(d.updated_at, d.created_at) >= ?");
+                    params_vec.push(from.clone());
+                }
+                if let Some(to) = &date_range.to {
+                    sql.push_str(" AND COALESCE(d.updated_at, d.created_at) <= ?");
+                    params_vec.push(to.clone());
+                }
+            }
+        }
+
+        sql.push_str(" ORDER BY score LIMIT ?");
+        params_vec.push(limit.to_string());
+
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+            let chunk_id: String = row.get(0)?;
+            let score: f32 = row.get(1)?;
+            Ok((chunk_id, score))
         })?;
 
         Ok(rows.filter_map(Result::ok).collect())
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Week 4 — Contextual Retrieval: fetch surrounding chunks (sibling window)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Returns `window` chunks on each side of `center_ordinal` for a given document,
-    /// plus the center chunk itself. Used for the Contextual Retrieval strategy.
-    pub fn get_context_chunks(
-        &self,
-        document_id: &str,
-        center_ordinal: i64,
-        window: usize,
-    ) -> Result<Vec<DocumentChunk>> {
+    pub fn get_all_unique_tags(&self) -> Result<std::collections::HashSet<String>> {
         let connection = self.connection.lock().expect("db lock poisoned");
-        let half = window as i64;
-        let low = (center_ordinal - half).max(0);
-        let high = center_ordinal + half;
-
-        let mut stmt = connection.prepare(
-            "SELECT id, document_id, ordinal, content, token_count, embedding_status,
-                    chunk_level, parent_chunk_id, created_at
-             FROM chunks
-             WHERE document_id = ?1
-               AND ordinal BETWEEN ?2 AND ?3
-               AND chunk_level != 'parent'
-             ORDER BY ordinal ASC",
-        )?;
-
-        let rows = stmt.query_map(params![document_id, low, high], |row| {
-            Ok(DocumentChunk {
-                id: row.get(0)?,
-                document_id: row.get(1)?,
-                ordinal: row.get(2)?,
-                content: row.get(3)?,
-                token_count: row.get(4)?,
-                embedding_status: row.get(5)?,
-                chunk_level: row.get(6)?,
-                parent_chunk_id: row.get(7)?,
-                created_at: row.get(8)?,
-            })
+        let mut statement = connection.prepare("SELECT tags_json FROM documents")?;
+        let rows = statement.query_map([], |row| {
+            let tags_json: String = row.get(0)?;
+            Ok(serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default())
         })?;
 
-        Ok(rows.filter_map(Result::ok).collect())
+        let mut tags = std::collections::HashSet::new();
+        for row in rows {
+            if let Ok(list) = row {
+                for tag in list {
+                    tags.insert(tag.to_lowercase());
+                }
+            }
+        }
+        Ok(tags)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Week 4 — Recursive Retrieval: fetch the parent summary chunk
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Given a child chunk id, fetches the parent summary chunk (if any).
-    pub fn get_parent_chunk(&self, child_chunk_id: &str) -> Result<Option<DocumentChunk>> {
+    pub fn get_all_unique_categories(&self) -> Result<std::collections::HashSet<String>> {
         let connection = self.connection.lock().expect("db lock poisoned");
+        let mut statement = connection.prepare("SELECT metadata_json FROM documents")?;
+        let rows = statement.query_map([], |row| {
+            let metadata_json: String = row.get(0)?;
+            let val: serde_json::Value = serde_json::from_str(&metadata_json).unwrap_or(serde_json::json!({}));
+            let cat = val.get("category")
+                .or_else(|| val.get("frontmatter").and_then(|f| f.get("category")))
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_lowercase());
+            Ok(cat)
+        })?;
 
-        // First look up the parent_chunk_id for this child
-        let parent_id_opt: Option<String> = {
-            let mut stmt = connection.prepare(
-                "SELECT parent_chunk_id FROM chunks WHERE id = ?1",
-            )?;
-            stmt.query_row(params![child_chunk_id], |row| row.get(0)).ok()
-        };
-
-        let Some(parent_id) = parent_id_opt else {
-            return Ok(None);
-        };
-
-        let mut stmt = connection.prepare(
-            "SELECT id, document_id, ordinal, content, token_count, embedding_status,
-                    chunk_level, parent_chunk_id, created_at
-             FROM chunks WHERE id = ?1",
-        )?;
-
-        let chunk = stmt.query_row(params![parent_id], |row| {
-            Ok(DocumentChunk {
-                id: row.get(0)?,
-                document_id: row.get(1)?,
-                ordinal: row.get(2)?,
-                content: row.get(3)?,
-                token_count: row.get(4)?,
-                embedding_status: row.get(5)?,
-                chunk_level: row.get(6)?,
-                parent_chunk_id: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        }).ok();
-
-        Ok(chunk)
-    }
-
-    /// Looks up a chunk by its id and returns its ordinal (for context window).
-    pub fn get_chunk_ordinal(&self, chunk_id: &str) -> Result<Option<i64>> {
-        let connection = self.connection.lock().expect("db lock poisoned");
-        let mut stmt = connection.prepare("SELECT ordinal FROM chunks WHERE id = ?1")?;
-        let ordinal = stmt.query_row(params![chunk_id], |row| row.get(0)).ok();
-        Ok(ordinal)
-    }
-
-    /// Looks up a document's title and metadata given its id.
-    pub fn get_document_meta(&self, document_id: &str) -> Result<Option<(String, String, Option<String>, Vec<String>)>> {
-        // Returns (title, source_kind, path_or_url, tags)
-        let connection = self.connection.lock().expect("db lock poisoned");
-        let mut stmt = connection.prepare(
-            "SELECT title, source_kind, path_or_url, tags_json FROM documents WHERE id = ?1"
-        )?;
-        let row = stmt.query_row(params![document_id], |row| {
-            let tags_json: String = row.get(3)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default(),
-            ))
-        }).ok();
-        Ok(row)
+        let mut categories = std::collections::HashSet::new();
+        for row in rows {
+            if let Ok(Some(cat)) = row {
+                categories.insert(cat);
+            }
+        }
+        Ok(categories)
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Supporting types
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A result hit from the FTS5 BM25 sparse search.
-#[derive(Debug, Clone)]
-pub struct FtsChunkHit {
-    pub chunk_id: String,
-    pub document_id: String,
-    /// BM25 score from SQLite FTS5 (negative; closer to 0 = more relevant)
-    pub bm25_score: f64,
-    pub content: String,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FTS5 query sanitizer
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Sanitizes a user query string for safe use in FTS5 MATCH clauses.
-/// Wraps multi-word queries in double-quotes to perform phrase search,
-/// or uses a simple term search for single words.
-fn sanitize_fts_query(query: &str) -> String {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    // Replace FTS5 special characters that could cause syntax errors
-    let safe = trimmed
-        .replace('"', " ")
-        .replace('*', " ")
-        .replace('^', " ")
-        .replace('(', " ")
-        .replace(')', " ")
-        .replace(':', " ")
-        .replace('-', " ");
-
-    let words: Vec<&str> = safe.split_whitespace().filter(|s| !s.is_empty()).collect();
-    if words.is_empty() {
-        return String::new();
-    }
-
-    if words.len() == 1 {
-        // Single word: exact term + prefix variant
-        format!("{} OR {}*", words[0], words[0])
-    } else {
-        // Multi-word: phrase match OR individual terms
-        let phrase = format!("\"{}\"", words.join(" "));
-        let terms = words.join(" ");
-        format!("{} OR {}", phrase, terms)
-    }
-}

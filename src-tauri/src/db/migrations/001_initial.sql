@@ -40,7 +40,6 @@ CREATE INDEX IF NOT EXISTS idx_documents_source_kind ON documents(source_kind);
 CREATE INDEX IF NOT EXISTS idx_documents_checksum ON documents(checksum);
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at);
 
--- Week 4: chunks extended with hierarchy support for Recursive Retrieval
 CREATE TABLE IF NOT EXISTS chunks (
   id TEXT PRIMARY KEY,
   document_id TEXT NOT NULL,
@@ -48,44 +47,27 @@ CREATE TABLE IF NOT EXISTS chunks (
   content TEXT NOT NULL,
   token_count INTEGER NOT NULL DEFAULT 0,
   embedding_status TEXT NOT NULL DEFAULT 'pending',
-  -- 'standard' = normal paragraph chunk, 'parent' = summary chunk, 'child' = fine-grained sub-chunk
-  chunk_level TEXT NOT NULL DEFAULT 'standard',
-  -- Non-null for child chunks; references the parent summary chunk
-  parent_chunk_id TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
-  FOREIGN KEY(parent_chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+  UNIQUE(document_id, ordinal)
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
-CREATE INDEX IF NOT EXISTS idx_chunks_level ON chunks(chunk_level);
-CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_chunk_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_doc_ordinal ON chunks(document_id, ordinal);
 
--- Week 4: FTS5 virtual table for Sparse / BM25 keyword retrieval
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-  content,
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
   chunk_id UNINDEXED,
   document_id UNINDEXED,
-  tokenize='porter unicode61'
+  source,
+  title,
+  content,
+  tags,
+  author,
+  category,
+  created_at UNINDEXED,
+  updated_at UNINDEXED,
+  tokenize = 'porter unicode61'
 );
-
--- FTS5 sync triggers to keep the index up-to-date
-CREATE TRIGGER IF NOT EXISTS chunks_fts_ai AFTER INSERT ON chunks BEGIN
-  INSERT INTO chunks_fts(content, chunk_id, document_id)
-  VALUES (new.content, new.id, new.document_id);
-END;
-
-CREATE TRIGGER IF NOT EXISTS chunks_fts_ad AFTER DELETE ON chunks BEGIN
-  DELETE FROM chunks_fts WHERE chunk_id = old.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS chunks_fts_au AFTER UPDATE ON chunks BEGIN
-  DELETE FROM chunks_fts WHERE chunk_id = old.id;
-  INSERT INTO chunks_fts(content, chunk_id, document_id)
-  VALUES (new.content, new.id, new.document_id);
-END;
 
 CREATE TABLE IF NOT EXISTS sync_state (
   id TEXT PRIMARY KEY,

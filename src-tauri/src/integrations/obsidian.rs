@@ -50,9 +50,32 @@ impl ObsidianIntegration {
             let checksum = format!("{:x}", Sha256::digest(raw.as_bytes()));
             let metadata = parsed
                 .data
-                .as_ref()
-                .map(|frontmatter| serde_json::json!({ "frontmatter": format!("{frontmatter:?}") }))
+                .map(|pod| {
+                    let val: serde_json::Value = pod.into();
+                    val
+                })
                 .unwrap_or_else(|| serde_json::json!({}));
+
+            let tags = metadata
+                .get("tags")
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|val| val.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+
+            let created_at = metadata
+                .get("date")
+                .or_else(|| metadata.get("created_at"))
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string());
+
+            let updated_at = metadata
+                .get("updated_at")
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string());
 
             docs.push(NormalizedDocument {
                 id: Uuid::new_v4().to_string(),
@@ -62,9 +85,9 @@ impl ObsidianIntegration {
                 content_markdown: raw.clone(),
                 content_plaintext: parsed.content,
                 path_or_url: Some(entry_path.to_string_lossy().to_string()),
-                tags: Vec::new(),
-                created_at: None,
-                updated_at: None,
+                tags,
+                created_at,
+                updated_at,
                 checksum,
                 metadata,
             });

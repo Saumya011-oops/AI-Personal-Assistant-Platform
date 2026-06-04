@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.tarkshy.assistant",
   "build": {
-    "beforeDevCommand": "npm --prefix /Users/saumyathacker/Desktop/rag_sys run dev --workspace @assistant/desktop",
-    "beforeBuildCommand": "npm --prefix /Users/saumyathacker/Desktop/rag_sys run build",
+    "beforeDevCommand": "npm run dev --workspace @assistant/desktop",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../apps/desktop/dist",
     "devUrl": "http://localhost:1420"
   },

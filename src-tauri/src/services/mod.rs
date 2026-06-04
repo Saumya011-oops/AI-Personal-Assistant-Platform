@@ -18,10 +18,15 @@ use crate::domain::{NormalizedDocument, SyncRun};
 use crate::integrations::google::PendingOAuthState;
 use crate::integrations::notion::NotionIntegration;
 pub mod chunker;
+pub mod context_builder;
+pub mod groq;
 pub mod ollama;
-pub mod pipeline;
+pub mod sparse;
+pub mod query_analyzer;
 pub mod qdrant;
+pub mod reranker;
 pub mod retrieval;
+pub mod pipeline;
 
 use crate::integrations::obsidian::ObsidianIntegration;
 
@@ -32,6 +37,7 @@ pub struct AppState {
     pub sync_service: Arc<SyncService>,
     pub credential_service: Arc<CredentialService>,
     pub pipeline_service: Arc<pipeline::PipelineService>,
+    pub retrieval_service: Arc<retrieval::RetrievalService>,
     pub oauth_pending_state: Arc<Mutex<Option<PendingOAuthState>>>,
     pub app_handle: AppHandle,
 }
