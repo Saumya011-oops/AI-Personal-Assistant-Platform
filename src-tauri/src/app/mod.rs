@@ -18,6 +18,8 @@ pub fn run() {
             let database = Database::connect(&config.database_path)?;
             database.run_migrations()?;
 
+            let credential_service = Arc::new(CredentialService::new(&handle)?);
+
             let ollama_service = crate::services::ollama::OllamaService::new(
                 config.ollama_url.clone(),
                 config.embedding_model.clone(),
@@ -33,6 +35,8 @@ pub fn run() {
             );
             let groq_service = crate::services::groq::GroqService::new(
                 config.groq_api_key.clone(),
+                Some(database.clone()),
+                Some(credential_service.clone()),
                 config.groq_base_url.clone(),
                 config.groq_model_primary.clone(),
                 config.groq_model_fallback.clone(),
@@ -83,7 +87,7 @@ pub fn run() {
                 config,
                 database,
                 sync_service: Arc::new(SyncService::new()),
-                credential_service: Arc::new(CredentialService::new(&handle)?),
+                credential_service,
                 pipeline_service,
                 retrieval_service,
                 oauth_pending_state: Arc::new(Mutex::new(None)),
@@ -102,6 +106,7 @@ pub fn run() {
             commands::settings::update_settings,
             commands::settings::select_obsidian_vault,
             commands::integrations::list_integrations,
+            commands::integrations::save_credential,
             commands::obsidian::scan_obsidian_vault,
             commands::notion::sync_notion_documents,
             commands::google_auth::connect_google,
@@ -112,6 +117,7 @@ pub fn run() {
             commands::documents::retrieve_documents,
             commands::documents::ask_assistant,
             commands::documents::clear_all_documents,
+            commands::settings::logout_and_reset,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");

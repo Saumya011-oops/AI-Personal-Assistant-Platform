@@ -37,8 +37,8 @@ export async function invokeCommand<T extends TauriCommandName>(
   }
 
   const parsed = commandResultSchema(schema.output).parse(rawResult);
-  if (!parsed.success || parsed.data === null || parsed.data === undefined) {
-    throw parsed.error ?? toAppError('UNKNOWN', 'Command returned no data');
+  if (!parsed.success) {
+    throw parsed.error ?? toAppError('UNKNOWN', 'Command failed');
   }
 
   return parsed.data;

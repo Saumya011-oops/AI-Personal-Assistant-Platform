@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import {
   Home,
   MessageSquare,
@@ -9,9 +10,11 @@ import {
   ChevronRight,
   MoreHorizontal,
   Zap,
+  LogOut,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import { useUiStore } from '@/stores/ui-store';
+import { invokeCommand } from '@/lib/api/invoke-command';
 
 interface NavItem {
   href: string;
@@ -63,16 +66,33 @@ export function AppSidebar() {
   const location = useLocation();
   const openPalette = useUiStore((state) => state.openCommandPalette);
 
+  const handleLogout = async () => {
+    const confirmLogout = window.confirm("Are you sure you want to log out? All your saved credentials and local data will be deleted.");
+    if (!confirmLogout) return;
+    try {
+      await invokeCommand('logout_and_reset', {});
+      localStorage.removeItem('onboarding_complete');
+      window.location.href = '/onboarding';
+    } catch (err) {
+      console.error('Logout failed:', err);
+      alert('Failed to delete all data during logout.');
+    }
+  };
+
   const workspaceItems = navItems.filter((i) => i.section === 'workspace');
   const systemItems = navItems.filter((i) => i.section === 'system');
 
   return (
-    <aside className="flex h-screen w-[260px] shrink-0 flex-col border-r border-surface-container-highest bg-surface-container-lowest z-50">
+    <aside className="flex h-screen w-[260px] shrink-0 flex-col border-r border-surface-container-highest/40 bg-[#0b1326]/60 backdrop-blur-xl z-50 shadow-2xl">
       {/* ── Logo ─────────────────────────────────────── */}
       <div className="flex items-center gap-3 p-5 pb-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary-container text-on-primary shadow-lg">
+        <motion.div 
+          whileHover={{ scale: 1.05, rotate: 5 }}
+          whileTap={{ scale: 0.95 }}
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary-glass/10 text-primary-glass glow-sm cursor-pointer"
+        >
           <Zap size={18} fill="currentColor" />
-        </div>
+        </motion.div>
         <div>
           <h1 className="text-[16px] font-bold text-on-surface tracking-tight leading-tight">
             Assistant Core
@@ -84,7 +104,7 @@ export function AppSidebar() {
       {/* ── Command Search ────────────────────────────── */}
       <div className="px-4 pb-5">
         <button
-          className="flex w-full items-center justify-between rounded-xl border border-outline-variant/30 bg-surface-container-high/50 px-3 py-2.5 text-on-surface-variant transition-all hover:bg-surface-container-high group"
+          className="flex w-full items-center justify-between rounded-xl border border-outline-variant/20 bg-surface-container-high/40 px-3 py-2.5 text-on-surface-variant transition-all hover:bg-surface-container-high hover:border-outline-variant/40 group"
           onClick={openPalette}
           type="button"
           id="sidebar-search-btn"
@@ -93,7 +113,7 @@ export function AppSidebar() {
             <Search size={15} />
             <span className="text-[13px]">Command Search</span>
           </div>
-          <span className="font-mono text-[10px] rounded border border-outline-variant bg-surface-container-highest px-1.5 py-0.5">
+          <span className="font-mono text-[10px] rounded border border-outline-variant/30 bg-surface-container-highest px-1.5 py-0.5">
             ⌘ K
           </span>
         </button>
@@ -119,16 +139,29 @@ export function AppSidebar() {
                   to={item.href}
                   end={item.href === '/'}
                   className={cn(
-                    'flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all group',
+                    'relative flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all group overflow-hidden',
                     isActive
-                      ? 'bg-primary-glass/10 text-primary-glass'
-                      : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
+                      ? 'text-primary-glass font-semibold'
+                      : 'text-on-surface-variant hover:text-on-surface',
                   )}
                 >
-                  <span className={cn('shrink-0', isActive ? 'text-primary-glass' : '')}>
-                    {item.icon}
-                  </span>
-                  <span className="text-[14px] font-medium">{item.label}</span>
+                  {isActive && (
+                    <motion.div
+                      layoutId="active-sidebar-nav"
+                      className="absolute inset-0 bg-primary-glass/8 border-l-2 border-primary-glass"
+                      transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                    />
+                  )}
+                  <motion.span 
+                    whileHover={{ x: 3 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                    className="relative z-10 flex items-center gap-3 w-full"
+                  >
+                    <span className={cn('shrink-0', isActive ? 'text-primary-glass' : 'group-hover:text-on-surface transition-colors')}>
+                      {item.icon}
+                    </span>
+                    <span className="text-[14px] font-medium">{item.label}</span>
+                  </motion.span>
                 </NavLink>
               );
             })}
@@ -149,16 +182,29 @@ export function AppSidebar() {
                   key={item.href}
                   to={item.href}
                   className={cn(
-                    'flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all',
+                    'relative flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all group overflow-hidden',
                     isActive
-                      ? 'bg-primary-glass/10 text-primary-glass'
-                      : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
+                      ? 'text-primary-glass font-semibold'
+                      : 'text-on-surface-variant hover:text-on-surface',
                   )}
                 >
-                  <span className={cn('shrink-0', isActive ? 'text-primary-glass' : '')}>
-                    {item.icon}
-                  </span>
-                  <span className="text-[14px] font-medium">{item.label}</span>
+                  {isActive && (
+                    <motion.div
+                      layoutId="active-sidebar-nav"
+                      className="absolute inset-0 bg-primary-glass/8 border-l-2 border-primary-glass"
+                      transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                    />
+                  )}
+                  <motion.span 
+                    whileHover={{ x: 3 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                    className="relative z-10 flex items-center gap-3 w-full"
+                  >
+                    <span className={cn('shrink-0', isActive ? 'text-primary-glass' : 'group-hover:text-on-surface transition-colors')}>
+                      {item.icon}
+                    </span>
+                    <span className="text-[14px] font-medium">{item.label}</span>
+                  </motion.span>
                 </NavLink>
               );
             })}
@@ -167,7 +213,7 @@ export function AppSidebar() {
       </nav>
 
       {/* ── User Card ────────────────────────────────── */}
-      <div className="mt-auto border-t border-surface-container-highest p-4">
+      <div className="mt-auto border-t border-surface-container-highest/40 p-4">
         <div className="flex items-center gap-3 rounded-xl px-2 py-2">
           <div className="h-8 w-8 shrink-0 rounded-full border border-outline-variant bg-surface-container-highest flex items-center justify-center overflow-hidden">
             <span className="text-[11px] font-bold text-primary-glass">ST</span>
@@ -177,11 +223,13 @@ export function AppSidebar() {
             <p className="text-[11px] text-outline">Workspace owner</p>
           </div>
           <button
-            className="text-outline hover:text-on-surface transition-colors"
+            onClick={handleLogout}
+            className="text-outline hover:text-red-400 transition-colors p-1.5 rounded-lg hover:bg-red-500/10"
             type="button"
-            aria-label="More options"
+            title="Log out and reset all data"
+            aria-label="Log out"
           >
-            <MoreHorizontal size={16} />
+            <LogOut size={16} />
           </button>
         </div>
       </div>

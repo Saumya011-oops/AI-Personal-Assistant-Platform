@@ -45,7 +45,7 @@ async fn reindex_database(
     if config.notion_token.is_some() {
         println!("\nScanning and indexing Notion documents...");
         let notion = NotionIntegration::new(config.clone());
-        let notion_sync_run = sync_service.run_notion_sync(database, &notion).await.context("Failed to sync Notion documents")?;
+        let notion_sync_run = sync_service.run_notion_sync(database, &notion, config.notion_token.as_deref().unwrap_or("")).await.context("Failed to sync Notion documents")?;
         println!("Notion Sync discovered {} documents.", notion_sync_run.documents_discovered);
     } else {
         println!("\nNotion token not configured, skipping Notion sync.");
@@ -137,6 +137,8 @@ async fn main() -> Result<()> {
     );
     let groq_service = GroqService::new(
         config.groq_api_key.clone(),
+        None,
+        None,
         config.groq_base_url.clone(),
         config.groq_model_primary.clone(),
         config.groq_model_fallback.clone(),

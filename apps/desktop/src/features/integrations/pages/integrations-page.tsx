@@ -1,4 +1,5 @@
 import { Loader2, RefreshCw, CheckCircle2, FolderOpen, Mail, Calendar, Plus } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
@@ -6,6 +7,29 @@ import { useGoogleConnectMutation } from '@/features/integrations/hooks/use-goog
 import { useIntegrationSummariesQuery } from '@/features/integrations/hooks/use-integration-summaries-query';
 import { useNotionSyncMutation } from '@/features/integrations/hooks/use-notion-sync-mutation';
 import { useObsidianScanMutation } from '@/features/integrations/hooks/use-obsidian-scan-mutation';
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.04,
+    },
+  },
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 12 },
+  show: {
+    opacity: 1,
+    y: 0,
+    transition: {
+      type: 'spring' as const,
+      stiffness: 280,
+      damping: 24,
+    },
+  },
+};
 
 // ── Icon map for each integration ──────────────────────────
 function IntegrationIcon({ kind }: { kind: string }) {
@@ -77,9 +101,14 @@ export function IntegrationsPage() {
   const allIntegrations = summaries.data ?? [];
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6 animate-slide-up">
+    <motion.div
+      variants={containerVariants}
+      initial="hidden"
+      animate="show"
+      className="max-w-6xl mx-auto space-y-6 select-none"
+    >
       {/* ── Page Header ─────────────────────────────────── */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <motion.div variants={itemVariants} className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
             Source Control
@@ -99,27 +128,29 @@ export function IntegrationsPage() {
           <RefreshCw size={15} />
           Refresh All
         </button>
-      </div>
+      </motion.div>
 
       <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
         {/* ── Active Integrations ──────────────────────── */}
-        <div className="space-y-4">
+        <motion.div variants={itemVariants} className="space-y-4">
           {allIntegrations.map((integration) => {
             const isNotion = integration.key === 'notion';
             const isObsidian = integration.key === 'obsidian';
             const isGoogle = integration.key === 'google';
             const sc = statusConfig(integration.status);
+            const isCurrentlySyncing = (isNotion && notionSync.isPending) || (isObsidian && obsidianScan.isPending);
 
             return (
-              <div
+              <motion.div
                 key={integration.key}
-                className="glass-panel rounded-2xl p-6 hover:border-primary-glass/20 transition-all"
+                whileHover={{ y: -2, borderColor: 'rgba(142, 213, 255, 0.2)' }}
+                className="glass-panel rounded-2xl p-6 transition-all"
                 id={`integration-${integration.key}`}
               >
                 <div className="flex items-start justify-between gap-4 flex-wrap">
                   <div className="flex items-start gap-4 min-w-0">
                     {/* Icon */}
-                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-surface-container-high border border-outline-variant/30">
+                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#0b1326]/30 border border-outline-variant/30">
                       <IntegrationIcon kind={integration.key} />
                     </div>
 
@@ -132,8 +163,8 @@ export function IntegrationsPage() {
                         <span
                           className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold ${sc.color} ${sc.bg} ${sc.border}`}
                         >
-                          <span className={`h-1.5 w-1.5 rounded-full ${sc.dot} animate-ai-pulse`} />
-                          {sc.label}
+                          <span className={`h-1.5 w-1.5 rounded-full ${sc.dot} ${isCurrentlySyncing ? 'animate-ai-pulse' : ''}`} />
+                          {isCurrentlySyncing ? 'syncing' : sc.label}
                         </span>
                       </div>
                       <p className="text-[13px] text-on-surface-variant">
@@ -212,30 +243,38 @@ export function IntegrationsPage() {
                 </div>
 
                 {/* Progress bar when syncing */}
-                {((isNotion && notionSync.isPending) ||
-                  (isObsidian && obsidianScan.isPending)) && (
-                  <div className="mt-4 space-y-1.5">
-                    <div className="flex justify-between font-mono text-[10px] text-outline">
-                      <span>
-                        {isNotion ? 'Fetching Notion documents…' : 'Scanning vault files…'}
-                      </span>
-                      <span>65% complete</span>
-                    </div>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest">
-                      <div
-                        className="h-full animate-shimmer rounded-full"
-                        style={{ width: '65%' }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
+                <AnimatePresence>
+                  {isCurrentlySyncing && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="mt-4 space-y-1.5 overflow-hidden"
+                    >
+                      <div className="flex justify-between font-mono text-[10px] text-outline">
+                        <span>
+                          {isNotion ? 'Fetching Notion documents…' : 'Scanning vault files…'}
+                        </span>
+                        <span>65% complete</span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest/60 relative">
+                        <motion.div
+                          className="h-full bg-primary-glass rounded-full shadow-[0_0_8px_rgba(142,213,255,0.6)]"
+                          initial={{ width: 0 }}
+                          animate={{ width: '65%' }}
+                          transition={{ duration: 1.5, ease: 'easeOut' }}
+                        />
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
             );
           })}
-        </div>
+        </motion.div>
 
         {/* ── Right Column: Roadmap + Stats ────────────── */}
-        <div className="space-y-4">
+        <motion.div variants={itemVariants} className="space-y-4">
           {/* Roadmap Adapters */}
           <div className="glass-panel rounded-2xl p-5">
             <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
@@ -247,7 +286,10 @@ export function IntegrationsPage() {
             </p>
 
             <div className="space-y-3">
-              <div className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-4 opacity-60">
+              <motion.div 
+                whileHover={{ x: 2 }} 
+                className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/20 p-4 opacity-60 transition-colors hover:bg-surface-container-high/30"
+              >
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-container-highest border border-outline-variant/20">
                   <Mail size={18} className="text-outline" />
                 </div>
@@ -257,9 +299,12 @@ export function IntegrationsPage() {
                     Thread summaries, inbox retrieval, and grounded email actions.
                   </p>
                 </div>
-              </div>
+              </motion.div>
 
-              <div className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-4 opacity-60">
+              <motion.div 
+                whileHover={{ x: 2 }} 
+                className="flex items-center gap-3 rounded-xl border border-outline-variant/20 bg-surface-container-high/20 p-4 opacity-60 transition-colors hover:bg-surface-container-high/30"
+              >
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-container-highest border border-outline-variant/20">
                   <Calendar size={18} className="text-outline" />
                 </div>
@@ -269,9 +314,9 @@ export function IntegrationsPage() {
                     Time-aware retrieval and schedule-assisted planning.
                   </p>
                 </div>
-              </div>
+              </motion.div>
 
-              <div className="flex items-center gap-3 rounded-xl border border-dashed border-outline-variant/20 bg-surface-container-high/10 p-4">
+              <div className="flex items-center gap-3 rounded-xl border border-dashed border-outline-variant/20 bg-[#0b1326]/10 p-4">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dashed border-outline-variant/30">
                   <Plus size={18} className="text-outline" />
                 </div>
@@ -309,8 +354,8 @@ export function IntegrationsPage() {
               </div>
             </div>
           </div>
-        </div>
+        </motion.div>
       </div>
-    </div>
+    </motion.div>
   );
 }

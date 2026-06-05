@@ -100,8 +100,24 @@ async fn run_background_obsidian_sync(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn run_background_notion_sync(state: &AppState) -> anyhow::Result<()> {
+    let db_token = match state.database.credential_repository().get_by_provider("notion") {
+        Ok(Some(record)) => {
+            match state.credential_service.decrypt(&record.encrypted_token_blob) {
+                Ok(token) => Some(token),
+                Err(err) => {
+                    tracing::error!("Failed to decrypt Notion token in background sync: {}", err);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let token = db_token
+        .ok_or_else(|| anyhow::anyhow!("Notion token is not configured"))?;
+
     let integration = NotionIntegration::new(state.config.clone());
-    state.sync_service.run_notion_sync(&state.database, &integration).await?;
+    state.sync_service.run_notion_sync(&state.database, &integration, &token).await?;
 
     // Process all pending chunks/embeddings in background
     let pipeline = state.pipeline_service.clone();

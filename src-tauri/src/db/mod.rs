@@ -39,6 +39,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn logout_reset(&self) -> Result<()> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        connection.execute("DELETE FROM credentials", [])?;
+        connection.execute("DELETE FROM chat_messages", [])?;
+        connection.execute("DELETE FROM sync_state", [])?;
+        connection.execute("DELETE FROM documents", [])?;
+        connection.execute("DELETE FROM chunk_fts", [])?;
+        connection.execute("UPDATE integrations SET status = 'not_connected', detail = NULL, last_synced_at = NULL", [])?;
+        connection.execute("UPDATE settings SET obsidian_vault_path = NULL", [])?;
+        Ok(())
+    }
+
     pub fn document_repository(&self) -> DocumentRepository {
         DocumentRepository::new(self.connection.clone())
     }

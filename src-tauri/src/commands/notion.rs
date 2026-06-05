@@ -9,10 +9,28 @@ pub async fn sync_notion_documents(
     state: State<'_, AppState>,
     _cursor: Option<String>,
 ) -> Result<CommandEnvelope<SyncRun>, String> {
+    let db_token = match state.database.credential_repository().get_by_provider("notion") {
+        Ok(Some(record)) => {
+            match state.credential_service.decrypt(&record.encrypted_token_blob) {
+                Ok(token) => Some(token),
+                Err(err) => {
+                    tracing::error!("Failed to decrypt Notion token: {}", err);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let token = match db_token {
+        Some(t) => t,
+        None => return Ok(CommandEnvelope::error("NOTION_TOKEN_MISSING", "Notion token is not configured. Please set it in onboarding or settings.".to_string())),
+    };
+
     let integration = NotionIntegration::new(state.config.clone());
     match state
         .sync_service
-        .run_notion_sync(&state.database, &integration)
+        .run_notion_sync(&state.database, &integration, &token)
         .await
     {
         Ok(result) => {

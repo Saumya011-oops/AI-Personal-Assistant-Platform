@@ -54,6 +54,7 @@ impl SyncService {
         &self,
         database: &Database,
         integration: &NotionIntegration,
+        token: &str,
     ) -> Result<SyncRun> {
         let run = self.create_run("notion");
         database.sync_repository().create_run(&run)?;
@@ -61,7 +62,7 @@ impl SyncService {
             .integration_repository()
             .update_status("notion", "syncing", Some("Fetching Notion documents"), None)?;
 
-        match integration.fetch_documents().await {
+        match integration.fetch_documents(token).await {
             Ok(documents) => self.finalize_success(database, run, "notion", documents),
             Err(error) => self.finalize_error(database, run, "notion", error.to_string()),
         }
@@ -171,4 +172,29 @@ impl CredentialService {
         });
         Ok(payload.to_string())
     }
+
+    pub fn decrypt(&self, encrypted_payload: &str) -> Result<String> {
+        let payload: serde_json::Value = serde_json::from_str(encrypted_payload)?;
+        let nonce_str = payload["nonce"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing nonce in encrypted payload"))?;
+        let ciphertext_str = payload["ciphertext"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing ciphertext in encrypted payload"))?;
+
+        let nonce_bytes = STANDARD.decode(nonce_str)?;
+        let ciphertext = STANDARD.decode(ciphertext_str)?;
+
+        let cipher = Aes256Gcm::new_from_slice(&self.cipher_key)
+            .map_err(|_| anyhow!("failed to initialize encryption key"))?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let plaintext_bytes = cipher
+            .decrypt(nonce, ciphertext.as_slice())
+            .map_err(|_| anyhow!("failed to decrypt credential"))?;
+
+        let plaintext = String::from_utf8(plaintext_bytes)?;
+        Ok(plaintext)
+    }
 }
+

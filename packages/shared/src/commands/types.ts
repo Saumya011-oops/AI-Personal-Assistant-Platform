@@ -52,6 +52,11 @@ export const assistantQueryInputSchema = z.object({
   query: z.string(),
 });
 
+export const saveCredentialInputSchema = z.object({
+  provider: z.string(),
+  token: z.string(),
+});
+
 export const tauriCommandSchemas = {
   get_app_status: {
     input: emptyPayloadSchema,
@@ -60,6 +65,10 @@ export const tauriCommandSchemas = {
   list_integrations: {
     input: emptyPayloadSchema,
     output: z.array(integrationSummarySchema),
+  },
+  save_credential: {
+    input: saveCredentialInputSchema,
+    output: z.unknown(),
   },
   get_settings: {
     input: emptyPayloadSchema,
@@ -110,6 +119,10 @@ export const tauriCommandSchemas = {
     output: assistantResponseSchema,
   },
   clear_all_documents: {
+    input: emptyPayloadSchema,
+    output: z.unknown(),
+  },
+  logout_and_reset: {
     input: emptyPayloadSchema,
     output: z.unknown(),
   },

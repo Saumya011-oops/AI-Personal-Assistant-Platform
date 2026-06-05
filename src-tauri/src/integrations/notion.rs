@@ -21,13 +21,7 @@ impl NotionIntegration {
         }
     }
 
-    pub async fn fetch_documents(&self) -> Result<Vec<NormalizedDocument>> {
-        let token = self
-            .config
-            .notion_token
-            .clone()
-            .ok_or_else(|| anyhow!("NOTION_TOKEN is not configured"))?;
-
+    pub async fn fetch_documents(&self, token: &str) -> Result<Vec<NormalizedDocument>> {
         let mut all_results: Vec<Value> = Vec::new();
         let mut start_cursor: Option<String> = None;
 

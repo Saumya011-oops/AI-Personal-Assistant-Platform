@@ -15,6 +15,7 @@ import {
   LayoutList,
   BarChart2,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 import { EmptyState } from '@/components/states/empty-state';
 import { LoadingState } from '@/components/states/loading-state';
@@ -211,6 +212,8 @@ export function DocumentsPage() {
               return (
                 <div
                   key={document.id}
+                  ref={rowVirtualizer.measureElement}
+                  data-index={virtualRow.index}
                   className="absolute left-0 top-0 w-full px-1 py-1"
                   style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >
@@ -256,216 +259,260 @@ export function DocumentsPage() {
       {/* ── Right: Detail / Analysis panes ───────────────── */}
       <div className="flex flex-1 flex-col overflow-hidden min-w-0">
         {/* Tab bar */}
-        <div className="flex items-center border-b border-surface-container-highest bg-surface-container-lowest/30 sticky top-0 z-10">
-          <nav className="flex">
+        <div className="flex items-center border-b border-surface-container-highest/40 bg-surface-container-lowest/30 sticky top-0 z-10">
+          <nav className="flex relative">
             {([
               { key: 'details', Icon: LayoutList, label: 'Document Details' },
               { key: 'analysis', Icon: BarChart2, label: 'Context Analysis' },
-            ] as const).map((tab) => (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={`flex items-center gap-2 px-6 py-4 text-[12px] font-semibold transition-all ${
-                  activeTab === tab.key
-                    ? 'border-b-2 border-primary-glass text-primary-glass'
-                    : 'border-b-2 border-transparent text-outline hover:text-on-surface'
-                }`}
-                type="button"
-                id={`tab-${tab.key}`}
-              >
-                <tab.Icon size={16} />
-                {tab.label}
-              </button>
-            ))}
+            ] as const).map((tab) => {
+              const isActive = activeTab === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`relative flex items-center gap-2 px-6 py-4 text-[12px] font-semibold transition-colors ${
+                    isActive ? 'text-primary-glass font-bold' : 'text-outline hover:text-on-surface'
+                  }`}
+                  type="button"
+                  id={`tab-${tab.key}`}
+                >
+                  {isActive && (
+                    <motion.div
+                      layoutId="active-documents-tab"
+                      className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary-glass"
+                      transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                    />
+                  )}
+                  <tab.Icon size={16} className="relative z-10" />
+                  <span className="relative z-10">{tab.label}</span>
+                </button>
+              );
+            })}
           </nav>
         </div>
 
         {/* Tab Content */}
         <div
           ref={previewRef}
-          className="flex-1 overflow-y-auto custom-scrollbar"
+          className="flex-1 overflow-y-auto custom-scrollbar bg-transparent"
         >
-          {activeTab === 'details' ? (
-            <div className="px-8 py-8 max-w-3xl animate-slide-up">
-              {/* Badges + source link */}
-              <div className="flex items-center justify-between gap-3 flex-wrap mb-6">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase border ${
-                      activeDocument.sourceKind === 'notion' ? 'badge-notion' : 'badge-obsidian'
-                    }`}
-                  >
-                    {activeDocument.sourceKind}
-                  </span>
-                  <span className="rounded-full border border-outline-variant/30 bg-surface-container px-3 py-1 text-[10px] font-semibold uppercase text-outline">
-                    ID Verified
-                  </span>
-                </div>
-                {activeDocument.pathOrUrl && (
-                  <a
-                    className="flex items-center gap-1 text-[13px] text-primary-glass hover:underline"
-                    href={activeDocument.pathOrUrl}
-                    rel="noreferrer"
-                    target="_blank"
-                  >
-                    Source Origin
-                    <ExternalLink size={14} />
-                  </a>
-                )}
-              </div>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={`${activeDocument.id}-${activeTab}`}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.15, ease: 'easeOut' }}
+              className="h-full min-h-full"
+            >
+              {activeTab === 'details' ? (
+                <div className="px-8 py-8 max-w-3xl">
+                  {/* Badges + source link */}
+                  <div className="flex items-center justify-between gap-3 flex-wrap mb-6">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase border ${
+                          activeDocument.sourceKind === 'notion' ? 'badge-notion' : 'badge-obsidian'
+                        }`}
+                      >
+                        {activeDocument.sourceKind}
+                      </span>
+                      <span className="rounded-full border border-outline-variant/30 bg-surface-container px-3 py-1 text-[10px] font-semibold uppercase text-outline">
+                        ID Verified
+                      </span>
+                    </div>
+                    {activeDocument.pathOrUrl && (
+                      <a
+                        className="flex items-center gap-1 text-[13px] text-primary-glass hover:underline"
+                        href={activeDocument.pathOrUrl}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        Source Origin
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
+                  </div>
 
-              {/* Title */}
-              <h1 className="text-3xl font-bold text-on-surface tracking-tight leading-tight mb-6">
-                {activeDocument.title}
-              </h1>
+                  {/* Title */}
+                  <h1 className="text-3xl font-bold text-on-surface tracking-tight leading-tight mb-6">
+                    {activeDocument.title}
+                  </h1>
 
-              {/* Meta grid */}
-              <div className="grid grid-cols-3 gap-4 py-5 border-y border-surface-container-highest mb-6">
-                <div className="space-y-1">
-                  <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                    Created
-                  </p>
-                  <p className="font-mono text-on-surface font-semibold text-[13px]">
-                    {activeDocument.createdAt
-                      ? new Date(activeDocument.createdAt).toLocaleDateString('en-US', {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                        })
-                      : 'Unknown'}
-                  </p>
-                  <p className="font-mono text-[10px] text-outline">
-                    {activeDocument.createdAt
-                      ? new Date(activeDocument.createdAt).toLocaleTimeString('en-US', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          timeZoneName: 'short',
-                        })
-                      : ''}
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                    Last Updated
-                  </p>
-                  <p className="font-mono text-on-surface font-semibold text-[13px]">
-                    {activeDocument.updatedAt
-                      ? new Date(activeDocument.updatedAt).toLocaleDateString('en-US', {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                        })
-                      : 'Unknown'}
-                  </p>
-                  <p className="font-mono text-[10px] text-outline">
-                    {activeDocument.updatedAt
-                      ? new Date(activeDocument.updatedAt).toLocaleTimeString('en-US', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          timeZoneName: 'short',
-                        })
-                      : ''}
-                  </p>
-                </div>
-                <div className="space-y-1 overflow-hidden">
-                  <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                    System ID
-                  </p>
-                  <p className="font-mono text-on-surface font-semibold text-[13px] truncate">
-                    {activeDocument.sourceExternalId.slice(0, 20)}…
-                  </p>
-                  <p className="font-mono text-[10px] text-outline">SHA-256 Hash</p>
-                </div>
-              </div>
-
-              {/* Document preview label */}
-              <p className="font-mono text-[10px] uppercase tracking-widest text-outline text-center mb-6">
-                Document Preview
-              </p>
-
-              {/* Content */}
-              <div className="space-y-4">
-                {activeDocument.contentPlaintext
-                  .split(/\n{2,}/)
-                  .filter(Boolean)
-                  .map((segment, index) => (
-                    <p
-                      key={`${activeDocument.id}-${index}`}
-                      className="text-[15px] leading-relaxed text-on-surface-variant"
-                    >
-                      {highlightText(segment, search)}
-                    </p>
-                  ))}
-              </div>
-            </div>
-          ) : (
-            <div className="p-8 grid grid-cols-1 lg:grid-cols-2 gap-8 animate-slide-up">
-              {/* Chunk Candidates */}
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-mono text-[10px] font-bold uppercase tracking-wider text-outline">
-                    Knowledge Chunks
-                  </h4>
-                  <span className="font-mono text-[10px] rounded border border-outline-variant/30 bg-surface-container-highest px-2 py-0.5 text-outline">
-                    {String(retrievalSegments.length).padStart(2, '0')}
-                  </span>
-                </div>
-                <div className="space-y-3">
-                  {retrievalSegments.map((segment, index) => (
-                    <div
-                      key={`${activeDocument.id}-chunk-${index}`}
-                      className="rounded-xl border border-tertiary/15 bg-tertiary/5 p-4"
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-mono text-[9px] font-bold uppercase text-outline">
-                          NODE_{String(index + 1).padStart(2, '0')}_A
-                        </span>
-                        <span className="font-mono text-[9px] text-primary-glass">
-                          Chunk {index + 1}
-                        </span>
-                      </div>
-                      <p className="text-[12px] leading-relaxed text-on-surface-variant italic">
-                        "{segment.slice(0, 200)}…"
+                  {/* Meta grid */}
+                  <div className="grid grid-cols-3 gap-4 py-5 border-y border-surface-container-highest/40 mb-6">
+                    <div className="space-y-1">
+                      <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
+                        Created
+                      </p>
+                      <p className="font-mono text-on-surface font-semibold text-[13px]">
+                        {activeDocument.createdAt
+                          ? new Date(activeDocument.createdAt).toLocaleDateString('en-US', {
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric',
+                            })
+                          : 'Unknown'}
+                      </p>
+                      <p className="font-mono text-[10px] text-outline">
+                        {activeDocument.createdAt
+                          ? new Date(activeDocument.createdAt).toLocaleTimeString('en-US', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              timeZoneName: 'short',
+                            })
+                          : ''}
                       </p>
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Related Documents */}
-              <div className="space-y-4">
-                <h4 className="font-mono text-[10px] font-bold uppercase tracking-wider text-outline">
-                  Related Documents
-                </h4>
-                {relatedDocuments.length === 0 ? (
-                  <p className="text-[13px] text-on-surface-variant">
-                    No closely related documents visible in the current filter set.
-                  </p>
-                ) : (
-                  <div className="space-y-3">
-                    {relatedDocuments.map((doc) => (
-                      <button
-                        key={doc.id}
-                        className="flex w-full items-center gap-4 rounded-xl border border-transparent p-4 hover:bg-surface-container-high/50 hover:border-outline-variant/30 transition-all group text-left"
-                        onClick={() => handleSelectDocument(doc.id)}
-                        type="button"
-                      >
-                        <div className="h-10 w-10 shrink-0 rounded-xl bg-surface-container-highest flex items-center justify-center border border-outline-variant/30">
-                          <FileText size={18} className="text-primary-glass" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="font-semibold text-on-surface text-[13px] group-hover:text-primary-glass transition-colors truncate">
-                            {doc.title}
-                          </p>
-                          <p className="text-[11px] text-outline mt-0.5">{doc.sourceKind}</p>
-                        </div>
-                      </button>
-                    ))}
+                    <div className="space-y-1">
+                      <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
+                        Last Updated
+                      </p>
+                      <p className="font-mono text-on-surface font-semibold text-[13px]">
+                        {activeDocument.updatedAt
+                          ? new Date(activeDocument.updatedAt).toLocaleDateString('en-US', {
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric',
+                            })
+                          : 'Unknown'}
+                      </p>
+                      <p className="font-mono text-[10px] text-outline">
+                        {activeDocument.updatedAt
+                          ? new Date(activeDocument.updatedAt).toLocaleTimeString('en-US', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              timeZoneName: 'short',
+                            })
+                          : ''}
+                      </p>
+                    </div>
+                    <div className="space-y-1 overflow-hidden">
+                      <p className="font-mono text-[10px] uppercase tracking-widest text-outline">
+                        System ID
+                      </p>
+                      <p className="font-mono text-on-surface font-semibold text-[13px] truncate">
+                        {activeDocument.sourceExternalId.slice(0, 20)}…
+                      </p>
+                      <p className="font-mono text-[10px] text-outline">SHA-256 Hash</p>
+                    </div>
                   </div>
-                )}
-              </div>
-            </div>
-          )}
+
+                  {/* Document preview label */}
+                  <p className="font-mono text-[10px] uppercase tracking-widest text-outline text-center mb-6">
+                    Document Preview
+                  </p>
+
+                  {/* Content */}
+                  <div className="space-y-4">
+                    {activeDocument.contentPlaintext
+                      .split(/\n{2,}/)
+                      .filter(Boolean)
+                      .map((segment, index) => (
+                        <p
+                          key={`${activeDocument.id}-${index}`}
+                          className="text-[15px] leading-relaxed text-on-surface-variant"
+                        >
+                          {highlightText(segment, search)}
+                        </p>
+                      ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="p-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* Chunk Candidates */}
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-mono text-[10px] font-bold uppercase tracking-wider text-outline">
+                        Knowledge Chunks
+                      </h4>
+                      <span className="font-mono text-[10px] rounded border border-outline-variant/30 bg-surface-container-highest px-2 py-0.5 text-outline">
+                        {String(retrievalSegments.length).padStart(2, '0')}
+                      </span>
+                    </div>
+                    <motion.div 
+                      variants={{
+                        hidden: { opacity: 0 },
+                        show: { opacity: 1, transition: { staggerChildren: 0.05 } }
+                      }}
+                      initial="hidden"
+                      animate="show"
+                      className="space-y-3"
+                    >
+                      {retrievalSegments.map((segment, index) => (
+                        <motion.div
+                          key={`${activeDocument.id}-chunk-${index}`}
+                          variants={{
+                            hidden: { opacity: 0, y: 8 },
+                            show: { opacity: 1, y: 0, transition: { type: 'spring', stiffness: 300, damping: 25 } }
+                          }}
+                          className="rounded-xl border border-tertiary/15 bg-tertiary/5 p-4"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-mono text-[9px] font-bold uppercase text-outline">
+                              NODE_{String(index + 1).padStart(2, '0')}_A
+                            </span>
+                            <span className="font-mono text-[9px] text-primary-glass">
+                              Chunk {index + 1}
+                            </span>
+                          </div>
+                          <p className="text-[12px] leading-relaxed text-on-surface-variant italic">
+                            "{segment.slice(0, 200)}…"
+                          </p>
+                        </motion.div>
+                      ))}
+                    </motion.div>
+                  </div>
+
+                  {/* Related Documents */}
+                  <div className="space-y-4">
+                    <h4 className="font-mono text-[10px] font-bold uppercase tracking-wider text-outline">
+                      Related Documents
+                    </h4>
+                    {relatedDocuments.length === 0 ? (
+                      <p className="text-[13px] text-on-surface-variant">
+                        No closely related documents visible in the current filter set.
+                      </p>
+                    ) : (
+                      <motion.div 
+                        variants={{
+                          hidden: { opacity: 0 },
+                          show: { opacity: 1, transition: { staggerChildren: 0.05 } }
+                        }}
+                        initial="hidden"
+                        animate="show"
+                        className="space-y-3"
+                      >
+                        {relatedDocuments.map((doc) => (
+                          <motion.button
+                            key={doc.id}
+                            variants={{
+                              hidden: { opacity: 0, y: 8 },
+                              show: { opacity: 1, y: 0, transition: { type: 'spring', stiffness: 300, damping: 25 } }
+                            }}
+                            whileHover={{ y: -2, borderColor: 'rgba(142, 213, 255, 0.25)', backgroundColor: 'rgba(14, 25, 47, 0.3)' }}
+                            className="flex w-full items-center gap-4 rounded-xl border border-transparent p-4 transition-all group text-left"
+                            onClick={() => handleSelectDocument(doc.id)}
+                            type="button"
+                          >
+                            <div className="h-10 w-10 shrink-0 rounded-xl bg-surface-container-highest flex items-center justify-center border border-outline-variant/30 group-hover:border-primary-glass/30">
+                              <FileText size={18} className="text-primary-glass" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-semibold text-on-surface text-[13px] group-hover:text-primary-glass transition-colors truncate">
+                                {doc.title}
+                              </p>
+                              <p className="text-[11px] text-outline mt-0.5">{doc.sourceKind}</p>
+                            </div>
+                          </motion.button>
+                        ))}
+                      </motion.div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </AnimatePresence>
         </div>
       </div>
     </div>

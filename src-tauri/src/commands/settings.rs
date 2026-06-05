@@ -51,3 +51,26 @@ pub async fn select_obsidian_vault(
         Err(error) => Ok(CommandEnvelope::error("VAULT_SAVE_FAILED", error.to_string())),
     }
 }
+
+#[tauri::command]
+pub async fn logout_and_reset(
+    state: State<'_, AppState>,
+) -> Result<CommandEnvelope<()>, String> {
+    // 1. Reset SQLite tables
+    if let Err(err) = state.database.logout_reset() {
+        return Ok(CommandEnvelope::error("SQLITE_RESET_FAILED", err.to_string()));
+    }
+
+    // 2. Clear Qdrant collection
+    if let Err(err) = state.pipeline_service.qdrant_service().clear_collection().await {
+        return Ok(CommandEnvelope::error("QDRANT_CLEAR_FAILED", err.to_string()));
+    }
+
+    // 3. Clear Sparse index
+    if let Err(err) = state.retrieval_service.clear_sparse_index().await {
+        return Ok(CommandEnvelope::error("SPARSE_INDEX_CLEAR_FAILED", err.to_string()));
+    }
+
+    Ok(CommandEnvelope::success(()))
+}
+

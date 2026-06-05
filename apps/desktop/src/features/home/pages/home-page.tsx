@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import {
   ArrowRight,
   MessageSquare,
@@ -13,6 +14,31 @@ import {
 import { useAppStatusQuery } from '@/features/dashboard/hooks/use-app-status-query';
 import { useDocumentsQuery } from '@/features/documents/hooks/use-documents-query';
 import { useIntegrationSummariesQuery } from '@/features/integrations/hooks/use-integration-summaries-query';
+
+const MotionLink = motion(Link);
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.04,
+    },
+  },
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 16 },
+  show: {
+    opacity: 1,
+    y: 0,
+    transition: {
+      type: 'spring' as const,
+      stiffness: 260,
+      damping: 24,
+    },
+  },
+};
 
 export function HomePage() {
   const appStatus = useAppStatusQuery();
@@ -31,11 +57,19 @@ export function HomePage() {
   const recentDocs = useMemo(() => documentItems.slice(0, 3), [documentItems]);
 
   return (
-    <div className="flex flex-col gap-6 max-w-[1480px] mx-auto animate-slide-up">
+    <motion.div
+      variants={containerVariants}
+      initial="hidden"
+      animate="show"
+      className="flex flex-col gap-6 max-w-[1480px] mx-auto select-none"
+    >
       {/* ── Top Row: Hero + System Readiness ──────────────── */}
       <div className="grid grid-cols-12 gap-5">
         {/* Hero card */}
-        <section className="col-span-12 lg:col-span-8 glass-panel rounded-2xl p-8 relative overflow-hidden flex flex-col justify-center min-h-[300px]">
+        <motion.section
+          variants={itemVariants}
+          className="col-span-12 lg:col-span-8 glass-panel rounded-2xl p-8 relative overflow-hidden flex flex-col justify-center min-h-[300px]"
+        >
           <div className="hero-glow" />
           <div className="relative z-10">
             <div className="flex flex-wrap gap-2 mb-5">
@@ -47,7 +81,7 @@ export function HomePage() {
               </span>
             </div>
 
-            <h2 className="text-4xl font-bold text-on-surface max-w-2xl mb-4 tracking-tight leading-[1.15]">
+            <h2 className="text-4xl font-bold text-on-surface max-w-2xl mb-4 tracking-tight leading-[1.15] text-gradient">
               A calm, local-first workspace for grounded AI work across your knowledge sources.
             </h2>
             <p className="text-[14px] text-on-surface-variant max-w-xl mb-7 leading-relaxed">
@@ -59,10 +93,10 @@ export function HomePage() {
               <Link
                 to="/assistant"
                 id="hero-open-assistant-btn"
-                className="flex items-center gap-2 rounded-xl bg-primary-container px-5 py-2.5 text-[14px] font-medium text-on-primary shadow-lg hover:brightness-110 active:scale-95 transition-all"
+                className="group flex items-center gap-2 rounded-xl bg-primary-glass px-5 py-2.5 text-[14px] font-bold text-black shadow-lg hover:glow active:scale-95 transition-all"
               >
                 Open Assistant
-                <ArrowRight size={16} />
+                <ArrowRight size={16} className="transition-transform group-hover:translate-x-0.5" />
               </Link>
               <Link
                 to="/documents"
@@ -82,54 +116,59 @@ export function HomePage() {
               </Link>
             </div>
           </div>
-        </section>
+        </motion.section>
 
         {/* System Readiness panel */}
-        <aside className="col-span-12 lg:col-span-4 glass-panel rounded-2xl p-6">
-          <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-5">
-            System Readiness
-          </p>
+        <motion.aside
+          variants={itemVariants}
+          className="col-span-12 lg:col-span-4 glass-panel rounded-2xl p-6 flex flex-col justify-between"
+        >
+          <div>
+            <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-5">
+              System Readiness
+            </p>
 
-          <div className="space-y-3">
-            <div className="rounded-xl border border-surface-container-highest bg-surface-container-high p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-on-surface text-[13px]">Retrieval pipeline</span>
-                <span className={`text-[10px] font-bold uppercase rounded px-2 py-0.5 ${retrievalReady ? 'bg-tertiary/10 text-tertiary' : 'bg-surface-container-highest text-outline'}`}>
-                  {retrievalReady ? 'Ready' : 'Needs setup'}
-                </span>
+            <div className="space-y-3">
+              <div className="rounded-xl border border-surface-container-highest/60 bg-[#0b1326]/30 p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-medium text-on-surface text-[13px]">Retrieval pipeline</span>
+                  <span className={`text-[10px] font-bold uppercase rounded px-2 py-0.5 ${retrievalReady ? 'bg-tertiary/10 text-tertiary' : 'bg-surface-container-highest text-outline'}`}>
+                    {retrievalReady ? 'Ready' : 'Needs setup'}
+                  </span>
+                </div>
+                <p className="text-[12px] text-on-surface-variant">
+                  {documentItems.length} indexed documents
+                </p>
               </div>
-              <p className="text-[12px] text-on-surface-variant">
-                {documentItems.length} indexed documents
-              </p>
-            </div>
 
-            <div className="rounded-xl border border-surface-container-highest bg-surface-container-high p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-on-surface text-[13px]">Source integrations</span>
-                <span className="text-[10px] font-bold rounded px-2 py-0.5 bg-primary-glass/10 text-primary-glass">
-                  {connectedIntegrations.length}/{integrationItems.length} Connected
-                </span>
+              <div className="rounded-xl border border-surface-container-highest/60 bg-[#0b1326]/30 p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-medium text-on-surface text-[13px]">Source integrations</span>
+                  <span className="text-[10px] font-bold rounded px-2 py-0.5 bg-primary-glass/10 text-primary-glass">
+                    {connectedIntegrations.length}/{integrationItems.length} Connected
+                  </span>
+                </div>
+                <p className="text-[12px] text-on-surface-variant truncate">
+                  {connectedIntegrations.length > 0
+                    ? connectedIntegrations.map((i) => i.label).join(', ')
+                    : 'No integrations connected yet'}
+                </p>
               </div>
-              <p className="text-[12px] text-on-surface-variant">
-                {connectedIntegrations.length > 0
-                  ? connectedIntegrations.map((i) => i.label).join(', ')
-                  : 'No integrations connected yet'}
-              </p>
-            </div>
 
-            <div className="rounded-xl border border-surface-container-highest bg-surface-container-high p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-on-surface text-[13px]">Desktop backend</span>
-                <span className={`text-[10px] font-bold uppercase rounded px-2 py-0.5 ${appStatus.data?.rustBackendAvailable ? 'bg-tertiary/10 text-tertiary' : 'bg-surface-container-highest text-outline'}`}>
-                  {appStatus.data?.rustBackendAvailable ? 'Live' : 'Pending'}
-                </span>
+              <div className="rounded-xl border border-surface-container-highest/60 bg-[#0b1326]/30 p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-medium text-on-surface text-[13px]">Desktop backend</span>
+                  <span className={`text-[10px] font-bold uppercase rounded px-2 py-0.5 ${appStatus.data?.rustBackendAvailable ? 'bg-tertiary/10 text-tertiary' : 'bg-surface-container-highest text-outline'}`}>
+                    {appStatus.data?.rustBackendAvailable ? 'Live' : 'Pending'}
+                  </span>
+                </div>
+                <p className="text-[12px] text-on-surface-variant">
+                  {appStatus.data?.environment ?? 'development'}
+                </p>
               </div>
-              <p className="text-[12px] text-on-surface-variant">
-                {appStatus.data?.environment ?? 'development'}
-              </p>
             </div>
           </div>
-        </aside>
+        </motion.aside>
       </div>
 
       {/* ── Quick Actions ─────────────────────────────────── */}
@@ -157,11 +196,14 @@ export function HomePage() {
             id: 'qa-integrations-btn',
           },
         ].map((action) => (
-          <Link
+          <MotionLink
             key={action.id}
             to={action.to}
             id={action.id}
-            className="glass-panel rounded-2xl p-6 flex flex-col gap-4 hover:border-primary-glass/30 hover:bg-surface-container-high/30 transition-all group"
+            variants={itemVariants}
+            whileHover={{ y: -4, borderColor: 'rgba(142, 213, 255, 0.25)', backgroundColor: 'rgba(14, 25, 47, 0.4)' }}
+            transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+            className="glass-panel rounded-2xl p-6 flex flex-col gap-4 group cursor-pointer"
           >
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-surface-container-high border border-outline-variant/30 group-hover:border-primary-glass/30 transition-all">
               {action.icon}
@@ -174,14 +216,17 @@ export function HomePage() {
                 {action.description}
               </p>
             </div>
-          </Link>
+          </MotionLink>
         ))}
       </section>
 
       {/* ── Bottom Row: Research Pulse + Workspace Health ── */}
       <div className="grid grid-cols-12 gap-5">
         {/* Research Pulse */}
-        <section className="col-span-12 lg:col-span-8 glass-panel rounded-2xl p-6">
+        <motion.section
+          variants={itemVariants}
+          className="col-span-12 lg:col-span-8 glass-panel rounded-2xl p-6"
+        >
           <div className="flex items-center justify-between mb-5">
             <div>
               <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
@@ -191,10 +236,10 @@ export function HomePage() {
             </div>
             <Link
               to="/documents"
-              className="text-[12px] text-primary-glass hover:underline flex items-center gap-1"
+              className="text-[12px] text-primary-glass hover:underline flex items-center gap-1 group"
             >
               View all projects
-              <ArrowRight size={12} />
+              <ArrowRight size={12} className="transition-transform group-hover:translate-x-0.5" />
             </Link>
           </div>
 
@@ -215,10 +260,12 @@ export function HomePage() {
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {recentDocs.map((doc) => (
-                <Link
+                <MotionLink
                   key={doc.id}
                   to="/documents"
-                  className="group rounded-xl border border-outline-variant/20 bg-surface-container-high/40 p-4 flex flex-col gap-3 hover:border-primary-glass/30 hover:bg-surface-container-high/60 transition-all"
+                  whileHover={{ y: -4, borderColor: 'rgba(142, 213, 255, 0.25)', backgroundColor: 'rgba(14, 25, 47, 0.4)' }}
+                  transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+                  className="group rounded-xl border border-outline-variant/20 bg-surface-container-high/40 p-4 flex flex-col gap-3 hover:border-primary-glass/30 transition-all cursor-pointer"
                 >
                   <span className={`inline-flex self-start rounded px-2 py-0.5 text-[10px] font-bold uppercase ${doc.sourceKind === 'notion' ? 'badge-notion' : 'badge-obsidian'}`}>
                     {doc.sourceKind}
@@ -235,22 +282,25 @@ export function HomePage() {
                       {doc.updatedAt ? new Date(doc.updatedAt).toLocaleDateString() : 'Unknown'}
                     </span>
                   </div>
-                </Link>
+                </MotionLink>
               ))}
             </div>
           )}
-        </section>
+        </motion.section>
 
         {/* Workspace Health */}
-        <aside className="col-span-12 lg:col-span-4 glass-panel rounded-2xl p-6">
+        <motion.aside
+          variants={itemVariants}
+          className="col-span-12 lg:col-span-4 glass-panel rounded-2xl p-6"
+        >
           <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-outline mb-1">
             Workspace Health
           </p>
           <h3 className="text-lg font-bold text-on-surface mb-5">High-level readiness without dashboard noise</h3>
 
           <div className="space-y-4">
-            <div className="flex items-start gap-3 py-4 border-b border-surface-container-highest">
-              <div className="h-9 w-9 rounded-lg bg-surface-container-high flex items-center justify-center shrink-0 border border-outline-variant/30">
+            <div className="flex items-start gap-3 py-4 border-b border-surface-container-highest/40">
+              <div className="h-9 w-9 rounded-lg bg-[#0b1326]/30 flex items-center justify-center shrink-0 border border-outline-variant/30">
                 <Database size={18} className="text-primary-glass" />
               </div>
               <div>
@@ -266,8 +316,8 @@ export function HomePage() {
               </div>
             </div>
 
-            <div className="flex items-start gap-3 py-4 border-b border-surface-container-highest">
-              <div className="h-9 w-9 rounded-lg bg-surface-container-high flex items-center justify-center shrink-0 border border-outline-variant/30">
+            <div className="flex items-start gap-3 py-4 border-b border-surface-container-highest/40">
+              <div className="h-9 w-9 rounded-lg bg-[#0b1326]/30 flex items-center justify-center shrink-0 border border-outline-variant/30">
                 <RefreshCw size={18} className="text-primary-glass" />
               </div>
               <div>
@@ -284,7 +334,7 @@ export function HomePage() {
             </div>
 
             <div className="flex items-start gap-3 py-4">
-              <div className="h-9 w-9 rounded-lg bg-surface-container-high flex items-center justify-center shrink-0 border border-outline-variant/30">
+              <div className="h-9 w-9 rounded-lg bg-[#0b1326]/30 flex items-center justify-center shrink-0 border border-outline-variant/30">
                 <Shield size={18} className="text-primary-glass" />
               </div>
               <div>
@@ -300,8 +350,8 @@ export function HomePage() {
               </div>
             </div>
           </div>
-        </aside>
+        </motion.aside>
       </div>
-    </div>
+    </motion.div>
   );
 }
