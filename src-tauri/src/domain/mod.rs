@@ -136,6 +136,10 @@ pub struct DocumentChunk {
     pub token_count: i64,
     pub embedding_status: String,
     pub created_at: String,
+    pub parent_id: Option<String>,
+    pub summary: Option<String>,
+    pub classification: Option<String>,
+    pub metadata_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -199,10 +203,26 @@ pub struct AssistantQueryInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConfidenceReport {
+    pub confidence: String,       // "high" | "medium" | "low"
+    pub confidence_score: u32,    // 0-100
+    pub reasons: Vec<String>,
+    pub status: String,           // "OK" | "EMPTY_RETRIEVAL" | "LOW_CONFIDENCE_RETRIEVAL" | "AMBIGUOUS_RETRIEVAL" | "PARTIAL_RETRIEVAL"
+    pub ambiguity_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Citation {
+    pub source_document: String,
+    pub source_type: String,
+    pub chunk_id: String,
+    pub retrieval_score: Option<f32>,
+    pub rerank_score: f32,
+    
+    // Legacy fields for backward compatibility
     pub source: String,
     pub document_id: String,
-    pub chunk_id: String,
     pub score: f32,
 }
 
@@ -211,6 +231,69 @@ pub struct Citation {
 pub struct AssistantResponse {
     pub answer: String,
     pub citations: Vec<Citation>,
+    pub confidence: Option<ConfidenceReport>,
+    pub diagnostics: Option<DiagnosticsPayload>,
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics & Recall Evaluation structs
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a single chunk used in pre/post rerank diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagChunk {
+    pub chunk_id: String,
+    pub document_title: String,
+    pub retrieval_score: f32,
+    pub rerank_score: f32,
+}
+
+/// Numerical breakdown of every signal that feeds into the confidence score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfidenceBreakdown {
+    pub reranker_top_sigmoid: f32,
+    pub avg_top5_sigmoid: f32,
+    pub chunk_count_bonus: i32,
+    pub document_focus_bonus: i32,
+    pub keyword_overlap_score: f32,
+    pub retrieval_signal_score: f32,
+    pub final_score: u32,
+    pub status: String,
+}
+
+/// Retrieval recall metrics — separates retrieval failures from confidence failures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallMetrics {
+    /// Document titles of the top-20 chunks before reranking.
+    pub pre_rerank_doc_titles: Vec<String>,
+    /// Document titles of the top-10 chunks after reranking.
+    pub post_rerank_doc_titles: Vec<String>,
+    pub unique_docs_pre_rerank: usize,
+    pub unique_docs_post_rerank: usize,
+    /// Whether the reranker changed the #1 ranked document.
+    pub top_doc_changed: bool,
+    pub pre_rerank_top_score: f32,
+    pub post_rerank_top_score: f32,
+    /// Fraction of factual anchors in the generated answer that can be traced back
+    /// to at least one retrieved chunk (0.0 = none traceable, 1.0 = fully grounded).
+    pub fact_coverage: f32,
+}
+
+/// Full diagnostics payload attached to every AssistantResponse.
+/// UI display is deferred — backend always populates this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsPayload {
+    pub strategy: String,
+    pub query_expanded: String,
+    pub pre_rerank_chunks: Vec<DiagChunk>,
+    pub post_rerank_chunks: Vec<DiagChunk>,
+    pub confidence_breakdown: ConfidenceBreakdown,
+    pub final_status: String,
+    pub recall_metrics: RecallMetrics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +305,7 @@ pub struct RetrievedChunk {
     pub document_title: String,
     pub content: String,
     pub score: f32,
+    pub retrieval_score: Option<f32>,
     pub ordinal: i64,
     pub path_or_url: Option<String>,
     pub tags: Vec<String>,
@@ -240,6 +324,7 @@ pub struct RetrievalResponse {
     pub analysis: QueryAnalysis,
     pub results: Vec<RetrievedChunk>,
     pub total_results: usize,
+    pub confidence: Option<ConfidenceReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +343,7 @@ pub struct ChunkSearchDocument {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub metadata: Value,
+    pub chunk_metadata_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

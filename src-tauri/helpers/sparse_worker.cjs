@@ -72,7 +72,7 @@ function matchesFilters(document, filters) {
 
   if (filters.tags?.length) {
     const tags = String(document.tags || '').toLowerCase();
-    if (!filters.tags.every((item) => tags.includes(String(item).toLowerCase()))) return false;
+    if (!filters.tags.some((item) => tags.includes(String(item).toLowerCase()))) return false;
   }
 
   if (filters.category?.length) {

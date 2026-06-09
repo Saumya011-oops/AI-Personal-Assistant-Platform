@@ -157,6 +157,14 @@ impl CredentialService {
         Ok(Self { cipher_key: key })
     }
 
+    pub fn new_no_handle() -> Result<Self> {
+        let config = AppConfig::load()?;
+        let mut key = [0_u8; 32];
+        let digest = sha2::Sha256::digest(config.app_secret_key.as_bytes());
+        key.copy_from_slice(&digest[..32]);
+        Ok(Self { cipher_key: key })
+    }
+
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
         let cipher = Aes256Gcm::new_from_slice(&self.cipher_key)
             .map_err(|_| anyhow!("failed to initialize encryption key"))?;

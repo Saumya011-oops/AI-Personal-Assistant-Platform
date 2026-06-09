@@ -138,8 +138,8 @@ impl DocumentRepository {
         // Insert new chunks
         for chunk in chunks {
             transaction.execute(
-                "INSERT INTO chunks (id, document_id, ordinal, content, token_count, embedding_status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO chunks (id, document_id, ordinal, content, token_count, embedding_status, parent_id, summary, classification, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     chunk.id,
                     chunk.document_id,
@@ -147,6 +147,10 @@ impl DocumentRepository {
                     chunk.content,
                     chunk.token_count,
                     chunk.embedding_status,
+                    chunk.parent_id,
+                    chunk.summary,
+                    chunk.classification,
+                    chunk.metadata_json,
                 ],
             )?;
         }
@@ -181,6 +185,16 @@ impl DocumentRepository {
         let tags = document.tags.join(" ");
 
         for chunk in chunks {
+            if chunk.embedding_status == "parent" {
+                continue;
+            }
+
+            let fts_content = if let Some(ref sum) = chunk.summary {
+                format!("{}\n\n{}", sum, chunk.content)
+            } else {
+                chunk.content.clone()
+            };
+
             transaction.execute(
                 "INSERT INTO chunk_fts (
                     chunk_id, document_id, source, title, content, tags, author, category, created_at, updated_at
@@ -190,7 +204,7 @@ impl DocumentRepository {
                     document.id,
                     document.source_kind,
                     document.title,
-                    chunk.content,
+                    fts_content,
                     tags,
                     author,
                     category,
@@ -207,7 +221,7 @@ impl DocumentRepository {
     pub fn get_chunks_by_document(&self, document_id: &str) -> Result<Vec<DocumentChunk>> {
         let connection = self.connection.lock().expect("db lock poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, document_id, ordinal, content, token_count, embedding_status, created_at
+            "SELECT id, document_id, ordinal, content, token_count, embedding_status, created_at, parent_id, summary, classification, metadata_json
              FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC",
         )?;
         let rows = statement.query_map(params![document_id], |row| {
@@ -219,6 +233,10 @@ impl DocumentRepository {
                 token_count: row.get(4)?,
                 embedding_status: row.get(5)?,
                 created_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                summary: row.get(8)?,
+                classification: row.get(9)?,
+                metadata_json: row.get(10)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -228,7 +246,7 @@ impl DocumentRepository {
     pub fn get_pending_chunks(&self) -> Result<Vec<DocumentChunk>> {
         let connection = self.connection.lock().expect("db lock poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, document_id, ordinal, content, token_count, embedding_status, created_at
+            "SELECT id, document_id, ordinal, content, token_count, embedding_status, created_at, parent_id, summary, classification, metadata_json
              FROM chunks WHERE embedding_status = 'pending'",
         )?;
         let rows = statement.query_map([], |row| {
@@ -240,6 +258,10 @@ impl DocumentRepository {
                 token_count: row.get(4)?,
                 embedding_status: row.get(5)?,
                 created_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                summary: row.get(8)?,
+                classification: row.get(9)?,
+                metadata_json: row.get(10)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -283,14 +305,16 @@ impl DocumentRepository {
                 c.ordinal,
                 d.source_kind,
                 d.title,
-                c.content,
+                COALESCE(p.content, c.content) AS content,
                 d.path_or_url,
                 d.tags_json,
                 d.metadata_json,
                 d.created_at,
-                d.updated_at
+                d.updated_at,
+                c.metadata_json AS chunk_metadata_json
              FROM chunks c
              JOIN documents d ON d.id = c.document_id
+             LEFT JOIN chunks p ON p.id = c.parent_id
              WHERE c.id IN ({placeholders})"
         );
         let mut statement = connection.prepare(&sql)?;
@@ -299,6 +323,7 @@ impl DocumentRepository {
             let metadata_json: String = row.get(8)?;
             let metadata: serde_json::Value =
                 serde_json::from_str(&metadata_json).unwrap_or(serde_json::json!({}));
+            let chunk_metadata_json: Option<String> = row.get(11)?;
             Ok(ChunkSearchDocument {
                 chunk_id: row.get(0)?,
                 document_id: row.get(1)?,
@@ -319,6 +344,7 @@ impl DocumentRepository {
                 created_at: row.get(9)?,
                 updated_at: row.get(10)?,
                 metadata,
+                chunk_metadata_json,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -338,9 +364,12 @@ impl DocumentRepository {
                 d.tags_json,
                 d.metadata_json,
                 d.created_at,
-                d.updated_at
+                d.updated_at,
+                c.summary,
+                c.metadata_json AS chunk_metadata_json
              FROM chunks c
              JOIN documents d ON d.id = c.document_id
+             WHERE c.embedding_status != 'parent'
              ORDER BY d.id, c.ordinal ASC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -348,13 +377,23 @@ impl DocumentRepository {
             let metadata_json: String = row.get(8)?;
             let metadata: serde_json::Value =
                 serde_json::from_str(&metadata_json).unwrap_or(serde_json::json!({}));
+            
+            let raw_content: String = row.get(5)?;
+            let summary: Option<String> = row.get(11)?;
+            let content = if let Some(sum) = summary {
+                format!("{}\n\n{}", sum, raw_content)
+            } else {
+                raw_content
+            };
+            let chunk_metadata_json: Option<String> = row.get(12)?;
+
             Ok(ChunkSearchDocument {
                 chunk_id: row.get(0)?,
                 document_id: row.get(1)?,
                 ordinal: row.get(2)?,
                 source_kind: row.get(3)?,
                 title: row.get(4)?,
-                content: row.get(5)?,
+                content,
                 path_or_url: row.get(6)?,
                 tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                 author: metadata
@@ -368,6 +407,7 @@ impl DocumentRepository {
                 created_at: row.get(9)?,
                 updated_at: row.get(10)?,
                 metadata,
+                chunk_metadata_json,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -501,5 +541,154 @@ impl DocumentRepository {
         }
         Ok(categories)
     }
+
+    pub fn save_rag_telemetry(
+        &self,
+        query: &str,
+        strategy: &str,
+        confidence_score: u32,
+        status: &str,
+        reasons: &[String],
+        confidence: &str,
+        top_document: Option<&str>,
+        top_document_score: Option<f32>,
+        ambiguity_score: Option<f32>,
+        hop_count: u32,
+        retrieval_latency_ms: u32,
+        rerank_latency_ms: u32,
+        lineage_json: Option<&str>,
+        // Recall evaluation fields
+        pre_rerank_top_doc: Option<&str>,
+        post_rerank_top_doc: Option<&str>,
+        unique_docs_pre: u32,
+        unique_docs_post: u32,
+        top_doc_changed: bool,
+        fact_coverage: f32,
+    ) -> Result<()> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        let reasons_json = serde_json::to_string(reasons)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        connection.execute(
+            "INSERT INTO RAG_telemetry (
+                id, query, strategy, confidence_score, status, reasons_json,
+                confidence, top_document, top_document_score, ambiguity_score,
+                hop_count, retrieval_latency_ms, rerank_latency_ms, lineage_json,
+                pre_rerank_top_doc, post_rerank_top_doc, unique_docs_pre,
+                unique_docs_post, top_doc_changed, fact_coverage
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     ?15, ?16, ?17, ?18, ?19, ?20)",
+            params![
+                id,
+                query,
+                strategy,
+                confidence_score,
+                status,
+                reasons_json,
+                confidence,
+                top_document,
+                top_document_score,
+                ambiguity_score,
+                hop_count as i32,
+                retrieval_latency_ms as i32,
+                rerank_latency_ms as i32,
+                lineage_json,
+                pre_rerank_top_doc,
+                post_rerank_top_doc,
+                unique_docs_pre as i32,
+                unique_docs_post as i32,
+                top_doc_changed as i32,
+                fact_coverage,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a score distribution report from the last 100 queries stored in
+    /// RAG_telemetry. Used to calibrate confidence thresholds from real data.
+    ///
+    /// Output includes:
+    /// - `total_queries`: number of rows analysed
+    /// - `status_counts`: map of status -> count
+    /// - `top_doc_score_percentiles`: P10/P25/P50/P75/P90 of top_document_score
+    /// - `confidence_score_percentiles`: P10/P25/P50/P75/P90 of confidence_score
+    /// - `fact_coverage_percentiles`: P10/P25/P50/P75/P90 of fact_coverage
+    /// - `top_doc_changed_rate`: fraction where top doc changed after reranking
+    /// - `reranker_model`: always "cross-encoder/ms-marco-MiniLM-L-6-v2 (raw logits)"
+    pub fn get_rag_performance_report(&self) -> anyhow::Result<serde_json::Value> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+
+        let mut stmt = connection.prepare(
+            "SELECT status, confidence_score, top_document_score, fact_coverage, top_doc_changed
+             FROM RAG_telemetry
+             ORDER BY rowid DESC
+             LIMIT 100"
+        )?;
+
+        #[derive(Debug)]
+        struct Row {
+            status: String,
+            confidence_score: f64,
+            top_doc_score: Option<f64>,
+            fact_coverage: Option<f64>,
+            top_doc_changed: bool,
+        }
+
+        let rows: Vec<Row> = stmt.query_map([], |row| {
+            Ok(Row {
+                status: row.get::<_, String>(0)?,
+                confidence_score: row.get::<_, f64>(1).unwrap_or(0.0),
+                top_doc_score: row.get::<_, Option<f64>>(2)?,
+                fact_coverage: row.get::<_, Option<f64>>(3)?,
+                top_doc_changed: row.get::<_, i32>(4).map(|v| v != 0).unwrap_or(false),
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        let total = rows.len();
+
+        let mut status_counts = std::collections::HashMap::<String, usize>::new();
+        for r in &rows {
+            *status_counts.entry(r.status.clone()).or_default() += 1;
+        }
+
+        let changed_count = rows.iter().filter(|r| r.top_doc_changed).count();
+        let changed_rate = if total > 0 { changed_count as f64 / total as f64 } else { 0.0 };
+
+        let percentiles = |mut values: Vec<f64>| -> serde_json::Value {
+            if values.is_empty() {
+                return serde_json::json!({ "p10": null, "p25": null, "p50": null, "p75": null, "p90": null });
+            }
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = values.len();
+            let at = |pct: f64| -> f64 {
+                let idx = ((pct / 100.0) * (n - 1) as f64).round() as usize;
+                values[idx.min(n - 1)]
+            };
+            serde_json::json!({ "p10": at(10.0), "p25": at(25.0), "p50": at(50.0), "p75": at(75.0), "p90": at(90.0) })
+        };
+
+        let conf_scores: Vec<f64> = rows.iter().map(|r| r.confidence_score).collect();
+        let doc_scores: Vec<f64> = rows.iter().filter_map(|r| r.top_doc_score).collect();
+        let cov_scores: Vec<f64> = rows.iter().filter_map(|r| r.fact_coverage).collect();
+
+        Ok(serde_json::json!({
+            "total_queries": total,
+            "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2 (raw logits)",
+            "status_counts": status_counts,
+            "top_doc_changed_rate": changed_rate,
+            "top_doc_changed_count": changed_count,
+            "confidence_score_percentiles": percentiles(conf_scores),
+            "top_doc_score_percentiles": percentiles(doc_scores),
+            "fact_coverage_percentiles": percentiles(cov_scores),
+            "threshold_reference": {
+                "note": "Thresholds are sigmoid(logit). ms-marco logit range for correct matches: [-3, +4]",
+                "empty_fires_below_sigmoid": 0.07,
+                "low_fires_below_sigmoid": 0.12,
+                "partial_fires_below_sigmoid": 0.30,
+                "ok_fires_above_sigmoid": 0.30
+            }
+        }))
+    }
 }
+
 

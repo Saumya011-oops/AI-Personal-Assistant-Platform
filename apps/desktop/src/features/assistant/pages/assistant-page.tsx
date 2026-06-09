@@ -122,15 +122,17 @@ export function AssistantPage() {
   const activeCitations = latestAssistantMessage?.citations ?? [];
 
   // Match active citations with metadata from documents.data
-  const citedDocuments = activeCitations.map((cit) => {
+  const citedDocuments = activeCitations.map((cit, idx) => {
     const matchedDoc = (documents.data ?? []).find((doc) => doc.id === cit.documentId);
     return {
       documentId: cit.documentId,
       chunkId: cit.chunkId,
-      score: cit.score,
-      sourceKind: cit.source || matchedDoc?.sourceKind || 'unknown',
-      title: matchedDoc?.title || `Document ${cit.documentId.slice(0, 8)}`,
+      // Prefer rich fields from backend; fall back to legacy
+      title: (cit as any).sourceDocument || matchedDoc?.title || `Document ${(cit.documentId ?? '').slice(0, 8)}`,
+      rerankScore: (cit as any).rerankScore ?? cit.score ?? 0,
+      sourceKind: (cit as any).sourceType || cit.source || matchedDoc?.sourceKind || 'unknown',
       contentPlaintext: matchedDoc?.contentPlaintext || 'Context retrieved from source document.',
+      idx,
     };
   });
 
@@ -226,20 +228,31 @@ export function AssistantPage() {
                     </p>
                     
                     {message.role === 'assistant' && message.citations && message.citations.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-outline-variant/15">
-                        <span className="text-[11px] text-outline">Citations:</span>
-                        {message.citations.map((src, citIdx) => (
-                          <span
-                            key={`${src.documentId}-${citIdx}`}
-                            onClick={() => {
-                              const fullDoc = (documents.data ?? []).find(d => d.id === src.documentId);
-                              if (fullDoc) setSelectedDoc(fullDoc);
-                            }}
-                            className="rounded bg-surface-container-high hover:bg-surface-container-highest cursor-pointer px-2 py-0.5 text-[11px] text-primary-glass border border-primary-glass/20 transition-colors"
-                          >
-                            @{src.source || 'Doc'} [{citIdx + 1}]
-                          </span>
-                        ))}
+                      <div className="flex flex-col gap-1.5 mt-3 pt-3 border-t border-outline-variant/15">
+                        <span className="text-[11px] text-outline font-semibold uppercase tracking-wider">Citations</span>
+                        {message.citations.map((src, citIdx) => {
+                          const sdoc = (src as any).sourceDocument || src.source || 'Unknown';
+                          const score = (src as any).rerankScore ?? src.score ?? 0;
+                          const chunkShort = (src.chunkId ?? '').slice(0, 8);
+                          const stype = (src as any).sourceType || src.source || 'doc';
+                          return (
+                            <div
+                              key={`${src.documentId}-${citIdx}`}
+                              onClick={() => {
+                                const fullDoc = (documents.data ?? []).find(d => d.id === src.documentId);
+                                if (fullDoc) setSelectedDoc(fullDoc);
+                              }}
+                              className="rounded-lg bg-surface-container-high hover:bg-surface-container-highest cursor-pointer px-3 py-2 border border-primary-glass/20 hover:border-primary-glass/40 transition-colors"
+                            >
+                              <p className="text-[12px] font-semibold text-on-surface truncate">{sdoc}</p>
+                              <div className="flex items-center gap-3 mt-0.5">
+                                <span className="font-mono text-[10px] text-outline uppercase">{stype}</span>
+                                <span className="text-[10px] text-outline">ID: {chunkShort}</span>
+                                <span className="text-[10px] text-primary-glass font-semibold ml-auto">Score: {score.toFixed(2)}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -439,30 +452,31 @@ export function AssistantPage() {
                   ) : (
                     <>
                       <p className="text-[11px] text-primary-glass font-semibold mb-1 uppercase tracking-wider">Cited Sources</p>
-                      {citedDocuments.map((doc, idx) => (
+                      {citedDocuments.map((doc) => (
                         <div
-                          key={`${doc.documentId}-${doc.chunkId}-${idx}`}
+                          key={`${doc.documentId}-${doc.chunkId}-${doc.idx}`}
                           onClick={() => {
                             const fullDoc = (documents.data ?? []).find(d => d.id === doc.documentId);
                             if (fullDoc) setSelectedDoc(fullDoc);
                           }}
                           className="rounded-xl border border-primary-glass/30 bg-primary-glass/5 hover:bg-primary-glass/10 p-4 hover:border-primary-glass/50 transition-all cursor-pointer group"
                         >
-                          <div className="flex items-start justify-between gap-2 mb-2">
+                          <div className="flex items-start justify-between gap-2 mb-1">
                             <div className="min-w-0">
                               <h4 className="font-semibold text-on-surface text-[13px] truncate group-hover:text-primary-glass transition-colors">
                                 {doc.title}
                               </h4>
-                              <span
-                                className={`font-mono text-[9px] uppercase font-bold ${
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className={`font-mono text-[9px] uppercase font-bold ${
                                   doc.sourceKind === 'notion' ? 'text-primary-glass' : 'text-tertiary'
-                                }`}
-                              >
-                                {doc.sourceKind}
-                              </span>
+                                }`}>
+                                  {doc.sourceKind}
+                                </span>
+                                <span className="font-mono text-[9px] text-outline">ID: {(doc.chunkId ?? '').slice(0, 8)}</span>
+                              </div>
                             </div>
                             <span className="shrink-0 rounded bg-primary-glass/20 px-1.5 py-0.5 text-[9px] text-primary-glass border border-primary-glass/30 font-semibold">
-                              {(doc.score * 100).toFixed(0)}% Match
+                              {(doc.rerankScore * 100).toFixed(0)}% match
                             </span>
                           </div>
                           <p className="text-[12px] text-on-surface-variant leading-relaxed line-clamp-3">

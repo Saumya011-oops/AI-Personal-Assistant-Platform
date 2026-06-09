@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS chunks (
   token_count INTEGER NOT NULL DEFAULT 0,
   embedding_status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  parent_id TEXT,
+  summary TEXT,
+  classification TEXT,
+  metadata_json TEXT DEFAULT '{}',
   FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
   UNIQUE(document_id, ordinal)
 );
@@ -104,3 +108,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_id ON chat_messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS RAG_telemetry (
+  id TEXT PRIMARY KEY,
+  query TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  confidence_score INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  reasons_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

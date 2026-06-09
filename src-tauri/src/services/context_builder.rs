@@ -108,6 +108,7 @@ mod tests {
             document_title: "Doc".to_string(),
             content: content.to_string(),
             score: 0.9,
+            retrieval_score: None,
             ordinal,
             path_or_url: None,
             tags: vec!["deployment".to_string()],

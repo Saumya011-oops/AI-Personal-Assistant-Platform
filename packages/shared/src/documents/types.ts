@@ -109,6 +109,10 @@ export const citationSchema = z.object({
   documentId: z.string(),
   chunkId: z.string(),
   score: z.number(),
+  sourceDocument: z.string().optional(),
+  sourceType: z.string().optional(),
+  retrievalScore: z.number().optional().nullable(),
+  rerankScore: z.number().optional(),
 });
 
 export const assistantResponseSchema = z.object({

@@ -36,6 +36,37 @@ impl Database {
         let sql = include_str!("migrations/001_initial.sql");
         let connection = self.connection.lock().expect("db lock poisoned");
         connection.execute_batch(sql)?;
+
+        let _ = connection.execute("ALTER TABLE chunks ADD COLUMN parent_id TEXT", []);
+        let _ = connection.execute("ALTER TABLE chunks ADD COLUMN summary TEXT", []);
+        let _ = connection.execute("ALTER TABLE chunks ADD COLUMN classification TEXT", []);
+        let _ = connection.execute("ALTER TABLE chunks ADD COLUMN metadata_json TEXT DEFAULT '{}'", []);
+        
+        let _ = connection.execute("CREATE TABLE IF NOT EXISTS RAG_telemetry (
+            id TEXT PRIMARY KEY,
+            query TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            confidence_score INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            reasons_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )", []);
+        
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN confidence TEXT", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN top_document TEXT", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN top_document_score REAL", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN ambiguity_score REAL", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN hop_count INTEGER", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN retrieval_latency_ms INTEGER", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN rerank_latency_ms INTEGER", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN lineage_json TEXT", []);
+        // Recall evaluation columns (backward-compatible, added via ALTER TABLE)
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN pre_rerank_top_doc TEXT", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN post_rerank_top_doc TEXT", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN unique_docs_pre INTEGER", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN unique_docs_post INTEGER", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN top_doc_changed INTEGER", []);
+        let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN fact_coverage REAL", []);
         Ok(())
     }
 

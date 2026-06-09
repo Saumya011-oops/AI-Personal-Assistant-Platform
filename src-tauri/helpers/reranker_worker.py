@@ -49,6 +49,17 @@ class Handler(BaseHTTPRequestHandler):
 
         pairs = [(query, chunk.get("content", "")) for chunk in chunks]
         scores = MODEL.predict(pairs)
+
+        # Log raw logits to stderr for threshold calibration.
+        # ms-marco-MiniLM-L-6-v2 outputs raw logits in ~[-10, +10].
+        # Correct matches typically score in [-3, +4].
+        # These logs help verify the Rust confidence thresholds are calibrated correctly.
+        import sys
+        for chunk, score in zip(chunks, scores):
+            chunk_id = chunk.get("chunkId", "?")
+            preview = (chunk.get("content", "") or "")[:60].replace("\n", " ")
+            print(f"[RERANKER_SIDECAR] query={query!r:.40} chunk_id={chunk_id} logit={float(score):.4f} preview={preview!r}", file=sys.stderr, flush=True)
+
         ranked = sorted(
             [
                 {

@@ -134,3 +134,16 @@ pub async fn clear_all_documents(
 
     Ok(CommandEnvelope::success(()))
 }
+
+/// Returns a score distribution report from the last 100 RAG telemetry entries.
+/// Use this to calibrate confidence thresholds against real reranker logit distributions.
+/// The reranker model (ms-marco-MiniLM-L-6-v2) outputs raw logits in [-10, +10].
+#[tauri::command]
+pub async fn get_rag_performance_report(
+    state: State<'_, AppState>,
+) -> Result<CommandEnvelope<serde_json::Value>, String> {
+    match state.database.document_repository().get_rag_performance_report() {
+        Ok(report) => Ok(CommandEnvelope::success(report)),
+        Err(err) => Ok(CommandEnvelope::error("RAG_REPORT_FAILED", err.to_string())),
+    }
+}

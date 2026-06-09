@@ -117,6 +117,7 @@ pub fn run() {
             commands::documents::retrieve_documents,
             commands::documents::ask_assistant,
             commands::documents::clear_all_documents,
+            commands::documents::get_rag_performance_report,
             commands::settings::logout_and_reset,
         ])
         .run(tauri::generate_context!())

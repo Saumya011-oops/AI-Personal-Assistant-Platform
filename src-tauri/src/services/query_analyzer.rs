@@ -119,6 +119,11 @@ impl QueryAnalyzerService {
             || normalized.contains("difference")
             || normalized.contains("what changed")
             || normalized.contains("changed between")
+            || normalized.contains("connect")
+            || normalized.contains("relationship")
+            || normalized.contains("relate")
+            || normalized.contains("link")
+            || normalized.contains("depend")
         {
             return RetrievalStrategy::Recursive;
         }
@@ -131,10 +136,14 @@ impl QueryAnalyzerService {
             return RetrievalStrategy::Sparse;
         }
 
-        if normalized.starts_with("explain")
-            || normalized.starts_with("how ")
-            || normalized.contains("architecture")
-            || normalized.contains("workflow")
+        // Dense is reserved for pure architecture/diagram/system-design queries with
+        // no entity keywords. For all "explain X" or "how X" queries, Hybrid is
+        // used so that BM25 also runs and keyword-rich documents (e.g. authentication
+        // token management) are not missed by the embedding layer alone.
+        if (normalized.contains("architecture") || normalized.contains("workflow")
+            || normalized.contains("system design") || normalized.contains("diagram"))
+            && !normalized.starts_with("explain")
+            && !normalized.starts_with("how ")
         {
             return RetrievalStrategy::Dense;
         }
@@ -291,6 +300,8 @@ mod tests {
     fn service() -> QueryAnalyzerService {
         QueryAnalyzerService::new(GroqService::new(
             None,
+            None,
+            None,
             "http://localhost".to_string(),
             "primary".to_string(),
             "fallback".to_string(),
@@ -340,6 +351,7 @@ mod tests {
             RetrievalStrategy::Faceted
         ));
     }
+
 
     #[test]
     fn selects_recursive_for_comparison_queries() {
@@ -401,9 +413,12 @@ mod tests {
                 }),
             )
             .unwrap();
+        // "Explain ... architecture" now routes to Hybrid (not Dense),
+        // because "explain" overrides the architecture keyword per our fix.
+        // Dense is only for pure architecture/workflow queries without explain/how.
         assert!(matches!(
             service.select_strategy("Explain our authentication architecture", &analysis),
-            RetrievalStrategy::Dense
+            RetrievalStrategy::Hybrid
         ));
     }
 }
