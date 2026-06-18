@@ -219,7 +219,14 @@ pub struct Citation {
     pub chunk_id: String,
     pub retrieval_score: Option<f32>,
     pub rerank_score: f32,
+    pub section: Option<String>,
+    pub evidence: Option<String>,
+    pub evidence_level: Option<String>,
     
+    pub document_title: String,
+    pub evidence_snippet: Option<String>,
+    pub source_connector: String,
+
     // Legacy fields for backward compatibility
     pub source: String,
     pub document_id: String,
@@ -255,9 +262,10 @@ pub struct DiagChunk {
 pub struct ConfidenceBreakdown {
     pub reranker_top_sigmoid: f32,
     pub avg_top5_sigmoid: f32,
-    pub chunk_count_bonus: i32,
+    pub evidence_consistency_score: i32,
     pub document_focus_bonus: i32,
     pub keyword_overlap_score: f32,
+    pub title_match_bonus: i32,
     pub retrieval_signal_score: f32,
     pub final_score: u32,
     pub status: String,

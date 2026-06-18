@@ -1,0 +1,18 @@
+{
+  "category_scores": {
+    "A": 100.0,
+    "B": 100.0,
+    "C": 100.0,
+    "D": 100.0,
+    "E": 100.0,
+    "F": 100.0,
+    "G": 100.0,
+    "H": 100.0,
+    "I": 100.0,
+    "J": 100.0
+  },
+  "failed_queries": 0,
+  "overall_score": 100.0,
+  "passed_queries": 18,
+  "total_queries": 18
+}

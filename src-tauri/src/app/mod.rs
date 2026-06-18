@@ -70,18 +70,41 @@ pub fn run() {
             let retrieval_clone = retrieval_service.clone();
             let database_clone = database.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(err) = pipeline_clone.initialize(&database_clone).await {
-                    tracing::error!("Failed to initialize retrieval pipeline: {}", err);
-                } else {
-                    tracing::info!("Retrieval pipeline initialized successfully");
+                // Pipeline initialization: Qdrant failure is non-fatal.
+                // The app continues in sparse-only mode if Qdrant is unavailable.
+                match pipeline_clone.initialize(&database_clone).await {
+                    Ok(_) => {
+                        tracing::info!("Retrieval pipeline initialized successfully");
+                    }
+                    Err(err) => {
+                        // Check whether it is a Qdrant connectivity error or something else
+                        let err_str = err.to_string();
+                        if err_str.contains("Qdrant") || err_str.contains("6333") || err_str.contains("connection") {
+                            tracing::warn!(
+                                "[STARTUP] ⚠️  Qdrant is not reachable: {}. \
+                                 Dense retrieval is DISABLED. \
+                                 The assistant will use sparse-only retrieval.",
+                                err
+                            );
+                        } else {
+                            tracing::error!("Failed to initialize retrieval pipeline: {}", err);
+                        }
+                    }
                 }
 
-                if let Err(err) = retrieval_clone.initialize(&database_clone).await {
-                    tracing::error!("Failed to initialize retrieval orchestrator: {}", err);
-                } else {
-                    tracing::info!("Retrieval orchestrator initialized successfully");
+                match retrieval_clone.initialize(&database_clone).await {
+                    Ok(_) => {
+                        tracing::info!("Retrieval orchestrator initialized successfully");
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to initialize retrieval orchestrator: {}", err);
+                    }
                 }
+
+                // Run Qdrant health check to produce a clear startup diagnostic
+                retrieval_clone.check_dense_retrieval_health().await;
             });
+
 
             let state = AppState {
                 config,

@@ -689,6 +689,56 @@ impl DocumentRepository {
             }
         }))
     }
+
+    // ── Phase 2: Topic Cluster + Document Graph persistence ──────────────────
+
+    /// Replaces all cluster assignments in `document_clusters` with the new assignments.
+    /// Called at startup and after every sync to keep the table in sync with in-memory state.
+    ///
+    /// `assignments`: Vec of (document_id, cluster_id, confidence)
+    pub fn save_document_clusters(&self, assignments: &[(String, String, f32)]) -> Result<()> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        connection.execute("DELETE FROM document_clusters", [])?;
+        for (doc_id, cluster_id, confidence) in assignments {
+            connection.execute(
+                "INSERT OR REPLACE INTO document_clusters (document_id, cluster_id, confidence)
+                 VALUES (?1, ?2, ?3)",
+                params![doc_id, cluster_id, confidence],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Returns all document IDs assigned to a given cluster, ordered by confidence desc.
+    pub fn get_cluster_document_ids(&self, cluster_id: &str) -> Result<Vec<String>> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        let mut stmt = connection.prepare(
+            "SELECT document_id FROM document_clusters
+             WHERE cluster_id = ?1
+             ORDER BY confidence DESC"
+        )?;
+        let ids = stmt.query_map(params![cluster_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
+    /// Replaces all edges in `document_graph_edges` with the new edge set.
+    /// Called at startup and after every sync.
+    ///
+    /// `edges`: Vec of (source_doc_id, target_doc_id, edge_type)
+    pub fn save_document_graph_edges(&self, edges: &[(String, String, &str)]) -> Result<()> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        connection.execute("DELETE FROM document_graph_edges", [])?;
+        for (source, target, edge_type) in edges {
+            connection.execute(
+                "INSERT OR REPLACE INTO document_graph_edges (source_doc_id, target_doc_id, edge_type)
+                 VALUES (?1, ?2, ?3)",
+                params![source, target, edge_type],
+            )?;
+        }
+        Ok(())
+    }
 }
 
 

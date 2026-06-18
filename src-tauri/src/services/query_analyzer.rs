@@ -44,7 +44,7 @@ impl QueryAnalyzerService {
     }
 
     async fn request_analysis(&self, query: &str) -> Result<Value> {
-        let system_prompt = "You are a query analysis engine for a retrieval orchestrator. Return strict JSON only with keys: intent, entities, metadataFilters, temporal, complexity, strategy. metadataFilters may contain source, author, tags, category, dateRange { from, to }. Do not include prose.";
+        let system_prompt = "You are a query analysis engine for a retrieval orchestrator. Return strict JSON only with keys: intent, entities, metadataFilters, temporal, complexity, strategy. metadataFilters may contain source, author, tags, category, dateRange { from, to }. Do not include prose. IMPORTANT: Only extract metadataFilters (like tags, category, source) if the user strictly and explicitly requests filtering by them in their query. Do not aggressively guess tags or categories from conversational keywords.";
         let user_prompt = format!(
             "Analyze this user query for retrieval planning.\nQuery: {query}\nReturn strict JSON."
         );
@@ -117,10 +117,14 @@ impl QueryAnalyzerService {
         if matches!(analysis.complexity, QueryComplexity::Complex)
             || normalized.contains("compare")
             || normalized.contains("difference")
+            || normalized.contains("vs")
+            || normalized.contains("versus")
             || normalized.contains("what changed")
             || normalized.contains("changed between")
             || normalized.contains("connect")
+            || normalized.contains("interact")
             || normalized.contains("relationship")
+            || normalized.contains("connection")
             || normalized.contains("relate")
             || normalized.contains("link")
             || normalized.contains("depend")

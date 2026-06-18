@@ -113,11 +113,18 @@ export const citationSchema = z.object({
   sourceType: z.string().optional(),
   retrievalScore: z.number().optional().nullable(),
   rerankScore: z.number().optional(),
+  section: z.string().optional().nullable(),
+  evidence: z.string().optional().nullable(),
+  evidenceLevel: z.string().optional().nullable(),
+  documentTitle: z.string(),
+  evidenceSnippet: z.string().nullable().optional(),
+  sourceConnector: z.string(),
 });
 
 export const assistantResponseSchema = z.object({
   answer: z.string(),
   citations: z.array(citationSchema),
+  diagnostics: z.any().optional().nullable(),
 });
 
 export type QueryAnalysis = z.infer<typeof queryAnalysisSchema>;

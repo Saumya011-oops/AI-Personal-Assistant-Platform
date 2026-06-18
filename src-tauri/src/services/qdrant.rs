@@ -163,6 +163,42 @@ impl QdrantService {
         Ok(search_response.result)
     }
 
+    /// Checks whether Qdrant is reachable and the collection exists.
+    /// Returns:
+    ///   Ok(true)  — server is reachable and collection is present
+    ///   Ok(false) — server is reachable but collection is missing or unhealthy
+    ///   Err(_)    — server is unreachable (connection refused, timeout, etc.)
+    pub async fn check_health(&self) -> Result<bool> {
+        let url = format!(
+            "{}/collections/{}",
+            self.base_url.trim_end_matches('/'),
+            self.collection_name
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Qdrant unreachable at {}: {}", self.base_url, e))?;
+
+        if response.status().is_success() {
+            return Ok(true);
+        }
+        if response.status().as_u16() == 404 {
+            return Ok(false);
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::warn!(
+            "[QDRANT_HEALTH] Unexpected response from Qdrant: HTTP {} — {}",
+            status, body
+        );
+        Ok(false)
+    }
+
     /// Deletes and recreates the Qdrant collection to clear all vectors.
     pub async fn clear_collection(&self) -> Result<()> {
         let url = format!(

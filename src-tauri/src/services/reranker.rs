@@ -67,14 +67,14 @@ impl RerankerService {
         self.wait_until_ready().await
     }
 
-    pub async fn rerank(&self, query: &str, mut chunks: Vec<RetrievedChunk>) -> Result<Vec<RetrievedChunk>> {
+    pub async fn rerank(&self, query: &str, mut chunks: Vec<RetrievedChunk>, limit: usize) -> Result<Vec<RetrievedChunk>> {
         let response = self
             .client
             .post(format!("{}/rerank", self.base_url))
             .json(&RerankRequest {
                 query,
                 chunks: &chunks,
-                limit: 10,
+                limit,
             })
             .send()
             .await?
@@ -102,7 +102,7 @@ impl RerankerService {
                 .partial_cmp(&left_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        chunks.truncate(10);
+        chunks.truncate(limit);
         Ok(chunks)
     }
 

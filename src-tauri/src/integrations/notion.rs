@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use reqwest::Client;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

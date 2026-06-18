@@ -22,6 +22,7 @@ interface Message {
   streaming?: boolean;
   citations?: Citation[];
   isError?: boolean;
+  diagnostics?: any;
 }
 
 const WELCOME_MESSAGE: Message = {
@@ -74,6 +75,7 @@ export function AssistantPage() {
         role: 'assistant',
         content: response.answer,
         citations: response.citations,
+        diagnostics: response.diagnostics,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (error: unknown) {
@@ -128,10 +130,13 @@ export function AssistantPage() {
       documentId: cit.documentId,
       chunkId: cit.chunkId,
       // Prefer rich fields from backend; fall back to legacy
-      title: (cit as any).sourceDocument || matchedDoc?.title || `Document ${(cit.documentId ?? '').slice(0, 8)}`,
+      title: (cit as any).documentTitle || (cit as any).sourceDocument || matchedDoc?.title || `Document ${(cit.documentId ?? '').slice(0, 8)}`,
       rerankScore: (cit as any).rerankScore ?? cit.score ?? 0,
-      sourceKind: (cit as any).sourceType || cit.source || matchedDoc?.sourceKind || 'unknown',
+      sourceKind: (cit as any).sourceConnector || (cit as any).sourceType || cit.source || matchedDoc?.sourceKind || 'unknown',
       contentPlaintext: matchedDoc?.contentPlaintext || 'Context retrieved from source document.',
+      section: (cit as any).section || 'General',
+      evidence: (cit as any).evidenceSnippet || (cit as any).evidence,
+      evidenceLevel: (cit as any).evidenceLevel || 'Supporting Evidence',
       idx,
     };
   });
@@ -228,13 +233,27 @@ export function AssistantPage() {
                     </p>
                     
                     {message.role === 'assistant' && message.citations && message.citations.length > 0 && (
-                      <div className="flex flex-col gap-1.5 mt-3 pt-3 border-t border-outline-variant/15">
-                        <span className="text-[11px] text-outline font-semibold uppercase tracking-wider">Citations</span>
+                      <div className="flex flex-col gap-2 mt-4 pt-3 border-t border-outline-variant/15">
+                        <span className="text-[11px] text-outline font-semibold uppercase tracking-wider mb-1">Evidence Sources</span>
                         {message.citations.map((src, citIdx) => {
-                          const sdoc = (src as any).sourceDocument || src.source || 'Unknown';
-                          const score = (src as any).rerankScore ?? src.score ?? 0;
-                          const chunkShort = (src.chunkId ?? '').slice(0, 8);
-                          const stype = (src as any).sourceType || src.source || 'doc';
+                          const sdoc = (src as any).documentTitle || (src as any).sourceDocument || (src.documentId ? `Document ${src.documentId.slice(0, 8)}` : 'Unknown Source');
+                          const sconn = (src as any).sourceConnector || src.source || 'doc';
+                          const stype = sconn.toLowerCase();
+                          const section = (src as any).section || 'General';
+                          const evidence = (src as any).evidenceSnippet || (src as any).evidence;
+                          const evidenceLevel = (src as any).evidenceLevel || 'Supporting Evidence';
+
+                          let pillStyle = '';
+                          if (evidenceLevel === 'High Evidence') {
+                            pillStyle = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                          } else if (evidenceLevel === 'Medium Evidence') {
+                            pillStyle = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+                          } else {
+                            pillStyle = 'bg-outline-variant/10 text-outline border border-outline-variant/20';
+                          }
+
+                          const icon = stype.includes('notion') ? '🟣' : stype.includes('obsidian') ? '📁' : '📄';
+
                           return (
                             <div
                               key={`${src.documentId}-${citIdx}`}
@@ -242,18 +261,77 @@ export function AssistantPage() {
                                 const fullDoc = (documents.data ?? []).find(d => d.id === src.documentId);
                                 if (fullDoc) setSelectedDoc(fullDoc);
                               }}
-                              className="rounded-lg bg-surface-container-high hover:bg-surface-container-highest cursor-pointer px-3 py-2 border border-primary-glass/20 hover:border-primary-glass/40 transition-colors"
+                              className="rounded-xl bg-surface-container-high/60 hover:bg-surface-container-highest cursor-pointer p-3.5 border border-primary-glass/10 hover:border-primary-glass/30 transition-all flex flex-col gap-2 shadow-sm group"
                             >
-                              <p className="text-[12px] font-semibold text-on-surface truncate">{sdoc}</p>
-                              <div className="flex items-center gap-3 mt-0.5">
-                                <span className="font-mono text-[10px] text-outline uppercase">{stype}</span>
-                                <span className="text-[10px] text-outline">ID: {chunkShort}</span>
-                                <span className="text-[10px] text-primary-glass font-semibold ml-auto">Score: {score.toFixed(2)}</span>
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0 flex-1">
+                                  <span className="text-[14px]">{icon}</span>
+                                  <div className="flex flex-col min-w-0">
+                                    <p className="text-[12px] font-bold text-on-surface truncate group-hover:text-primary-glass transition-colors">{sdoc}</p>
+                                    <p className="text-[9px] text-outline font-semibold uppercase tracking-wider">{sconn}</p>
+                                  </div>
+                                </div>
+                                <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold shrink-0 border uppercase tracking-wider ${pillStyle}`}>
+                                  {evidenceLevel}
+                                </span>
+                              </div>
+
+                              <div className="text-[11px] text-on-surface-variant flex flex-col gap-1 pl-5">
+                                <p className="font-semibold text-outline-variant">
+                                  <span className="text-outline">Section:</span> {section}
+                                </p>
+                                {evidence && (
+                                  <p className="italic text-on-surface-variant/80 border-l-2 border-primary-glass/30 pl-2 py-0.5 mt-0.5">
+                                    "{evidence}"
+                                  </p>
+                                )}
                               </div>
                             </div>
                           );
                         })}
                       </div>
+                    )}
+                    {message.role === 'assistant' && message.diagnostics && (
+                      <details className="mt-4 text-[11px] text-on-surface-variant bg-surface-container-high/30 rounded-xl border border-outline-variant/15 p-3.5 cursor-pointer select-none group transition-all">
+                        <summary className="font-semibold text-outline hover:text-primary-glass transition-colors list-none flex items-center gap-1">
+                          <span className="group-open:rotate-90 transition-transform duration-200">▶</span>
+                          Developer Diagnostics
+                        </summary>
+                        <div className="mt-3 grid grid-cols-2 gap-4 border-t border-outline-variant/15 pt-3 select-text cursor-default">
+                          <div className="space-y-1.5 font-mono">
+                            <p><span className="text-outline">Strategy:</span> {message.diagnostics.strategy}</p>
+                            <p><span className="text-outline">Intent:</span> {message.diagnostics.finalStatus}</p>
+                            <p><span className="text-outline">Confidence:</span> {message.diagnostics.confidenceBreakdown?.finalScore ?? 0}/100</p>
+                          </div>
+                          <div className="space-y-1.5 font-mono">
+                            <p><span className="text-outline">Recall unique docs pre:</span> {message.diagnostics.recallMetrics?.uniqueDocsPreRerank ?? 0}</p>
+                            <p><span className="text-outline">Recall unique docs post:</span> {message.diagnostics.recallMetrics?.uniqueDocsPostRerank ?? 0}</p>
+                            <p><span className="text-outline">Top doc changed:</span> {message.diagnostics.recallMetrics?.topDocChanged ? 'Yes' : 'No'}</p>
+                          </div>
+                          
+                          <div className="col-span-2 border-t border-outline-variant/15 pt-2 mt-1">
+                            <p className="font-bold text-outline uppercase tracking-wider text-[9px] mb-1.5">Pre-Rerank Chunks</p>
+                            <div className="space-y-1 font-mono text-[10px] max-h-24 overflow-y-auto custom-scrollbar">
+                              {message.diagnostics.preRerankChunks?.map((chunk: any, i: number) => (
+                                <p key={i} className="truncate">
+                                  {i + 1}. {chunk.documentTitle} (retrieval: {chunk.retrievalScore?.toFixed(3) ?? '0'})
+                                </p>
+                              )) ?? <p className="text-outline italic">No pre-rerank chunks</p>}
+                            </div>
+                          </div>
+
+                          <div className="col-span-2 border-t border-outline-variant/15 pt-2">
+                            <p className="font-bold text-outline uppercase tracking-wider text-[9px] mb-1.5">Post-Rerank Chunks</p>
+                            <div className="space-y-1 font-mono text-[10px] max-h-24 overflow-y-auto custom-scrollbar">
+                              {message.diagnostics.postRerankChunks?.map((chunk: any, i: number) => (
+                                <p key={i} className="truncate">
+                                  {i + 1}. {chunk.documentTitle} (rerank logit: {chunk.rerankScore?.toFixed(3) ?? '0'})
+                                </p>
+                              )) ?? <p className="text-outline italic">No post-rerank chunks</p>}
+                            </div>
+                          </div>
+                        </div>
+                      </details>
                     )}
                   </div>
                 </motion.div>
@@ -452,38 +530,62 @@ export function AssistantPage() {
                   ) : (
                     <>
                       <p className="text-[11px] text-primary-glass font-semibold mb-1 uppercase tracking-wider">Cited Sources</p>
-                      {citedDocuments.map((doc) => (
-                        <div
-                          key={`${doc.documentId}-${doc.chunkId}-${doc.idx}`}
-                          onClick={() => {
-                            const fullDoc = (documents.data ?? []).find(d => d.id === doc.documentId);
-                            if (fullDoc) setSelectedDoc(fullDoc);
-                          }}
-                          className="rounded-xl border border-primary-glass/30 bg-primary-glass/5 hover:bg-primary-glass/10 p-4 hover:border-primary-glass/50 transition-all cursor-pointer group"
-                        >
-                          <div className="flex items-start justify-between gap-2 mb-1">
-                            <div className="min-w-0">
-                              <h4 className="font-semibold text-on-surface text-[13px] truncate group-hover:text-primary-glass transition-colors">
-                                {doc.title}
-                              </h4>
-                              <div className="flex items-center gap-2 mt-0.5">
-                                <span className={`font-mono text-[9px] uppercase font-bold ${
-                                  doc.sourceKind === 'notion' ? 'text-primary-glass' : 'text-tertiary'
-                                }`}>
-                                  {doc.sourceKind}
-                                </span>
-                                <span className="font-mono text-[9px] text-outline">ID: {(doc.chunkId ?? '').slice(0, 8)}</span>
+                      {citedDocuments.map((doc) => {
+                        const icon = doc.sourceKind.toLowerCase() === 'notion' ? '🟣' : doc.sourceKind.toLowerCase() === 'obsidian' ? '📁' : '📄';
+
+                        let pillStyle = '';
+                        if (doc.evidenceLevel === 'High Evidence') {
+                          pillStyle = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                        } else if (doc.evidenceLevel === 'Medium Evidence') {
+                          pillStyle = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+                        } else {
+                          pillStyle = 'bg-outline-variant/10 text-outline border border-outline-variant/20';
+                        }
+
+                        return (
+                          <div
+                            key={`${doc.documentId}-${doc.chunkId}-${doc.idx}`}
+                            onClick={() => {
+                              const fullDoc = (documents.data ?? []).find(d => d.id === doc.documentId);
+                              if (fullDoc) setSelectedDoc(fullDoc);
+                            }}
+                            className="rounded-xl border border-primary-glass/20 bg-surface-container-high/40 hover:bg-surface-container-highest p-4 hover:border-primary-glass/40 transition-all cursor-pointer flex flex-col gap-2 group"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[12px]">{icon}</span>
+                                  <h4 className="font-bold text-on-surface text-[13px] truncate group-hover:text-primary-glass transition-colors">
+                                    {doc.title}
+                                  </h4>
+                                </div>
+                                <div className="flex items-center gap-2 mt-1 pl-5">
+                                  <span className={`font-mono text-[9px] uppercase font-bold ${
+                                    doc.sourceKind.toLowerCase() === 'notion' ? 'text-primary-glass' : 'text-tertiary'
+                                  }`}>
+                                    {doc.sourceKind}
+                                  </span>
+                                  <span className="text-[10px] text-outline-variant">|</span>
+                                  <span className="text-[10px] text-outline">Section: {doc.section}</span>
+                                </div>
                               </div>
+                              <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-bold border uppercase tracking-wider ${pillStyle}`}>
+                                {doc.evidenceLevel}
+                              </span>
                             </div>
-                            <span className="shrink-0 rounded bg-primary-glass/20 px-1.5 py-0.5 text-[9px] text-primary-glass border border-primary-glass/30 font-semibold">
-                              {(doc.rerankScore * 100).toFixed(0)}% match
-                            </span>
+
+                            {doc.evidence && (
+                              <p className="text-[11px] italic text-on-surface-variant/80 border-l border-primary-glass/30 pl-2 ml-5 py-0.5">
+                                "{doc.evidence}"
+                              </p>
+                            )}
+
+                            <p className="text-[11px] text-on-surface-variant leading-relaxed line-clamp-3 ml-5 font-light">
+                              {doc.contentPlaintext.slice(0, 160)}…
+                            </p>
                           </div>
-                          <p className="text-[12px] text-on-surface-variant leading-relaxed line-clamp-3">
-                            {doc.contentPlaintext.slice(0, 160)}…
-                          </p>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </>
                   )}
                 </div>

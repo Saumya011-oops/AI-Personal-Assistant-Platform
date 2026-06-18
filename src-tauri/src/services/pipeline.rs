@@ -42,7 +42,15 @@ impl PipelineService {
 
     /// Initializes Qdrant collection on startup.
     pub async fn initialize(&self, database: &Database) -> Result<()> {
-        self.qdrant_service.initialize_collection().await?;
+        // Qdrant initialization is best-effort: if it's unavailable, continue with sparse-only.
+        match self.qdrant_service.initialize_collection().await {
+            Ok(_) => tracing::info!("[PIPELINE] Qdrant collection initialized successfully."),
+            Err(err) => tracing::warn!(
+                "[PIPELINE] ⚠️  Qdrant collection init failed: {}. \
+                 Dense retrieval disabled for this session.",
+                err
+            ),
+        }
         self.sparse_service.initialize().await?;
         let documents = database.document_repository().list_all_chunk_search_documents()?;
         self.sparse_service.rebuild_index(&documents).await?;

@@ -67,6 +67,11 @@ impl Database {
         let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN unique_docs_post INTEGER", []);
         let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN top_doc_changed INTEGER", []);
         let _ = connection.execute("ALTER TABLE RAG_telemetry ADD COLUMN fact_coverage REAL", []);
+
+        // Phase 2: Topic Graph tables (idempotent via CREATE TABLE IF NOT EXISTS)
+        let sql_002 = include_str!("migrations/002_topic_graph.sql");
+        connection.execute_batch(sql_002)?;
+
         Ok(())
     }
 

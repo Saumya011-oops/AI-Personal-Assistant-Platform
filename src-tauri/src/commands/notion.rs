@@ -35,10 +35,18 @@ pub async fn sync_notion_documents(
     {
         Ok(result) => {
             let pipeline = state.pipeline_service.clone();
+            let retrieval = state.retrieval_service.clone();
             let db = state.database.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(err) = pipeline.process_all_pending_documents(&db).await {
-                    tracing::error!("Background embedding pipeline failed after Notion sync: {}", err);
+                match pipeline.process_all_pending_documents(&db).await {
+                    Ok(_) => {
+                        if let Err(err) = retrieval.rebuild_topic_graph(&db).await {
+                            tracing::error!("Failed to rebuild topic graph after Notion sync: {}", err);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!("Background embedding pipeline failed after Notion sync: {}", err);
+                    }
                 }
             });
             Ok(CommandEnvelope::success(result))

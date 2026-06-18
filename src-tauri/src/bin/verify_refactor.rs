@@ -57,6 +57,7 @@ async fn run_and_verify(retrieval_service: &RetrievalService, database: &Databas
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
     println!("=== RAG Refactored Retrieval Verification ===");
 
     // Load configuration
@@ -112,32 +113,22 @@ async fn main() -> Result<()> {
     retrieval_service.initialize(&database).await.context("Failed to initialize retrieval service")?;
     println!("System ready. Starting verification queries.");
 
-    // Query 1: Configuration-style exact query
-    run_and_verify(&retrieval_service, &database, "What chunk size does the RAG system use?").await?;
+    let queries = vec![
+        "Compare Notion and Obsidian integrations",
+        "Compare Prometheus and Grafana",
+        "How does onboarding connect to Notion setup?",
+        "How does authentication interact with Qdrant access control?",
+        "Difference between OAuth and token management",
+        "Explain setup",
+    ];
 
-    println!("Sleeping 15 seconds to avoid Groq TPM rate limits...");
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-    // Query 2: Ambiguous query
-    run_and_verify(&retrieval_service, &database, "Explain onboarding").await?;
-
-    println!("Sleeping 15 seconds to avoid Groq TPM rate limits...");
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-    // Query 3: Connected multi-hop recursive query
-    run_and_verify(&retrieval_service, &database, "How does onboarding connect to Notion integration setup?").await?;
-
-    println!("Sleeping 15 seconds to avoid Groq TPM rate limits...");
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-    // Query 4: Non-existent facts query (should trigger EMPTY_RETRIEVAL)
-    run_and_verify(&retrieval_service, &database, "Which database stores employee salaries?").await?;
-
-    println!("Sleeping 15 seconds to avoid Groq TPM rate limits...");
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-    // Query 5: Out of context query (should trigger LOW_CONFIDENCE or EMPTY_RETRIEVAL)
-    run_and_verify(&retrieval_service, &database, "What encryption algorithm protects JWT access tokens?").await?;
+    for (i, query) in queries.iter().enumerate() {
+        if i > 0 {
+            println!("Sleeping 15 seconds to avoid Groq TPM rate limits...");
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+        run_and_verify(&retrieval_service, &database, query).await?;
+    }
 
     println!("\n========================================================================");
     println!("All verification queries executed successfully!");
