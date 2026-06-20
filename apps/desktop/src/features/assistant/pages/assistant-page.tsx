@@ -126,11 +126,24 @@ export function AssistantPage() {
   // Match active citations with metadata from documents.data
   const citedDocuments = activeCitations.map((cit, idx) => {
     const matchedDoc = (documents.data ?? []).find((doc) => doc.id === cit.documentId);
+    const resolvedTitle =
+      (cit as any).documentTitle ||
+      (cit as any).sourceDocument ||
+      matchedDoc?.title ||
+      `Document ${(cit.documentId ?? '').slice(0, 8)}`;
+    // [CITATION_UI] diagnostic: shows exactly what the frontend receives at runtime
+    console.log(
+      `[CITATION_UI] id=${cit.documentId}`,
+      `documentTitle=${(cit as any).documentTitle}`,
+      `sourceDocument=${(cit as any).sourceDocument}`,
+      `matchedDocTitle=${matchedDoc?.title}`,
+      `rendered="${resolvedTitle}"`,
+      '| full_object:', JSON.stringify(cit),
+    );
     return {
       documentId: cit.documentId,
       chunkId: cit.chunkId,
-      // Prefer rich fields from backend; fall back to legacy
-      title: (cit as any).documentTitle || (cit as any).sourceDocument || matchedDoc?.title || `Document ${(cit.documentId ?? '').slice(0, 8)}`,
+      title: resolvedTitle,
       rerankScore: (cit as any).rerankScore ?? cit.score ?? 0,
       sourceKind: (cit as any).sourceConnector || (cit as any).sourceType || cit.source || matchedDoc?.sourceKind || 'unknown',
       contentPlaintext: matchedDoc?.contentPlaintext || 'Context retrieved from source document.',
@@ -236,7 +249,22 @@ export function AssistantPage() {
                       <div className="flex flex-col gap-2 mt-4 pt-3 border-t border-outline-variant/15">
                         <span className="text-[11px] text-outline font-semibold uppercase tracking-wider mb-1">Evidence Sources</span>
                         {message.citations.map((src, citIdx) => {
-                          const sdoc = (src as any).documentTitle || (src as any).sourceDocument || (src.documentId ? `Document ${src.documentId.slice(0, 8)}` : 'Unknown Source');
+                          // Look up document metadata by ID — same fallback the right panel uses
+                          const matchedDoc = (documents.data ?? []).find(d => d.id === src.documentId);
+                          const sdoc =
+                            (src as any).documentTitle ||
+                            (src as any).sourceDocument ||
+                            matchedDoc?.title ||
+                            (src.documentId ? `Document ${src.documentId.slice(0, 8)}` : 'Unknown Source');
+                          // [CITATION_UI] diagnostic for inline card render
+                          console.log(
+                            `[CITATION_UI][card] id=${src.documentId}`,
+                            `documentTitle=${(src as any).documentTitle}`,
+                            `sourceDocument=${(src as any).sourceDocument}`,
+                            `matchedDocTitle=${matchedDoc?.title}`,
+                            `rendered="${sdoc}"`,
+                            '| full_object:', JSON.stringify(src),
+                          );
                           const sconn = (src as any).sourceConnector || src.source || 'doc';
                           const stype = sconn.toLowerCase();
                           const section = (src as any).section || 'General';

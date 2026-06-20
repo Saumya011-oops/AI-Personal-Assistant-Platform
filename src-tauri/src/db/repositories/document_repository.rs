@@ -125,6 +125,36 @@ impl DocumentRepository {
         Ok(rows)
     }
 
+    pub fn get_document_by_id(&self, id: &str) -> Result<Option<NormalizedDocument>> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        let select = "SELECT id, source_kind, source_external_id, title, content_markdown, content_plaintext, path_or_url, tags_json, checksum, metadata_json, created_at, updated_at FROM documents WHERE id = ?1";
+        let mut stmt = connection.prepare(select)?;
+        let mut rows = stmt.query_map(params![id], |row| {
+            let tags_json: String = row.get(7)?;
+            let metadata_json: String = row.get(9)?;
+            Ok(NormalizedDocument {
+                id: row.get(0)?,
+                source_kind: row.get(1)?,
+                source_external_id: row.get(2)?,
+                title: row.get(3)?,
+                content_markdown: row.get(4)?,
+                content_plaintext: row.get(5)?,
+                path_or_url: row.get(6)?,
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                checksum: row.get(8)?,
+                metadata: serde_json::from_str(&metadata_json).unwrap_or(serde_json::json!({})),
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?;
+
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn save_chunks(&self, document_id: &str, chunks: &[DocumentChunk]) -> Result<()> {
         let mut connection = self.connection.lock().expect("db lock poisoned");
         let transaction = connection.transaction()?;

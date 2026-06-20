@@ -23,7 +23,9 @@ use crate::services::reranker::RerankerService;
 use crate::services::sparse::SparseRetrievalService;
 use crate::services::topic_cluster::TopicCluster;
 
+#[allow(dead_code)]
 const MIN_ENTITY_RECURSION_SCORE: i32 = 3;
+#[allow(dead_code)]
 const MAX_RECURSIVE_ENTITIES: usize = 3;
 
 #[derive(Clone)]
@@ -318,20 +320,52 @@ impl RetrievalService {
             top_chunks.truncate(3);
 
             let built_context = self.context_builder.build(top_chunks.clone());
-            let mut ans = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
-
-            // ── Fact-level citation verification ──────────────────────────────
-            let coverage = verify_answer_against_chunks(&ans, &top_chunks);
-            if coverage < 0.50 {
-                ans = format!(
-                    "⚠️ Some claims in this answer could not be traced to retrieved sources.\n\n{}",
-                    ans
-                );
-                // Soft downgrade: OK → PARTIAL, PARTIAL → LOW (do not touch EMPTY/LOW)
+            let dict = self.entity_dictionary.read().await;
+            
+            let intent_type = determine_query_intent(query, &retrieval.analysis, &dict);
+            let mut comparison_failed = false;
+            if intent_type == QueryIntentType::Comparison {
+                let entities = extract_comparison_entities(query);
+                if !entities.is_empty() {
+                    let all_chunks_content = top_chunks.iter()
+                        .map(|c| format!("{} {}", c.content.to_lowercase(), c.document_title.to_lowercase()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    
+                    for entity in &entities {
+                        let entity_words: Vec<&str> = entity.split_whitespace().filter(|w| w.len() > 2).collect();
+                        if entity_words.is_empty() {
+                            continue;
+                        }
+                        let mut entity_present = false;
+                        for word in &entity_words {
+                            if all_chunks_content.contains(word) {
+                                entity_present = true;
+                                break;
+                            }
+                        }
+                        if !entity_present {
+                            comparison_failed = true;
+                            break;
+                        }
+                    }
+                }
             }
 
-            let dict = self.entity_dictionary.read().await;
-            let mut cits: Vec<Citation> = built_context
+            let (mut ans, total_sent, kept_sent, removed_sent) = if comparison_failed {
+                (
+                    "Insufficient evidence was found to compare these systems completely.".to_string(),
+                    1,
+                    1,
+                    0,
+                )
+            } else {
+                let raw_ans = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
+                verify_and_ground_answer(&self.ollama_service, &raw_ans, &top_chunks).await?
+            };
+
+            // Build citations
+            let mut raw_cits: Vec<Citation> = built_context
                 .chunks
                 .into_iter()
                 .map(|chunk| {
@@ -344,7 +378,15 @@ impl RetrievalService {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     let evidence = extract_evidence(&chunk.content, query, &dict);
-                    let has_evidence = evidence.is_some();
+                    
+                    let evidence_snippet = evidence.clone().unwrap_or_else(|| {
+                        let trimmed = chunk.content.trim();
+                        if trimmed.len() > 160 {
+                            format!("{}...", &trimmed[..160])
+                        } else {
+                            trimmed.to_string()
+                        }
+                    });
 
                     let sigmoid = |x: f32| 1.0_f32 / (1.0 + (-x).exp());
                     let sig = sigmoid(rerank_score);
@@ -352,14 +394,10 @@ impl RetrievalService {
                     let anchors = extract_factual_anchors(&ans);
                     let match_count = anchors.iter().filter(|a| chunk.content.to_lowercase().contains(&a.to_lowercase())).count();
 
-                    let evidence_level = if has_evidence {
-                        if match_count >= 2 || sig >= 0.75 {
-                            "High Evidence".to_string()
-                        } else if match_count >= 1 || sig >= 0.45 {
-                            "Medium Evidence".to_string()
-                        } else {
-                            "Supporting Evidence".to_string()
-                        }
+                    let evidence_level = if match_count >= 2 || sig >= 0.75 {
+                        "High Evidence".to_string()
+                    } else if match_count >= 1 || sig >= 0.45 {
+                        "Medium Evidence".to_string()
                     } else {
                         "Supporting Evidence".to_string()
                     };
@@ -371,12 +409,11 @@ impl RetrievalService {
                         retrieval_score,
                         rerank_score,
                         section,
-                        evidence: evidence.clone(),
-                        evidence_level: Some(evidence_level.clone()),
+                        evidence: Some(evidence_snippet.clone()),
+                        evidence_level: Some(evidence_level),
                         document_title: clean_document_title(&chunk.document_title),
-                        evidence_snippet: evidence.clone(),
+                        evidence_snippet: Some(evidence_snippet),
                         source_connector: chunk.source.clone(),
-                        // Legacy:
                         source: chunk.source.clone(),
                         document_id: chunk.document_id.clone(),
                         score: chunk.score,
@@ -384,43 +421,35 @@ impl RetrievalService {
                 })
                 .collect();
 
-            // Sort citations by:
-            // 1. Evidence level (High > Medium > Supporting).
-            // 2. Document relevance (rerank score descending).
-            // 3. Number of supporting citations for that document in the top set.
-            let mut doc_counts = HashMap::new();
-            for cit in &cits {
-                *doc_counts.entry(cit.source_document.clone()).or_insert(0) += 1;
+            // Validate citations
+            let original_cits_len = raw_cits.len();
+            raw_cits.retain(|cit| validate_citation_source(database, cit, &top_chunks));
+            let validated_cits_len = raw_cits.len();
+
+            // Deduplicate and sort citations
+            let cits = deduplicate_and_sort_citations(raw_cits);
+
+            // Citation Success Gate
+            let is_comparison_fallback = ans == "Insufficient evidence was found to compare these systems completely.";
+            if !ans.is_empty() && cits.is_empty() && !is_comparison_fallback {
+                ans = "I found relevant information but could not verify supporting sources.".to_string();
             }
 
-            cits.sort_by(|a, b| {
-                let level_score = |level: &Option<String>| match level.as_deref() {
-                    Some("High Evidence") => 3,
-                    Some("Medium Evidence") => 2,
-                    Some("Supporting Evidence") => 1,
-                    _ => 0,
-                };
-                
-                let a_level = level_score(&a.evidence_level);
-                let b_level = level_score(&b.evidence_level);
-                
-                if a_level != b_level {
-                    return b_level.cmp(&a_level);
-                }
-                
-                if let Some(ord) = b.rerank_score.partial_cmp(&a.rerank_score) {
-                    if ord != std::cmp::Ordering::Equal {
-                        return ord;
-                    }
-                }
-                
-                let a_count = doc_counts.get(&a.source_document).copied().unwrap_or(0);
-                let b_count = doc_counts.get(&b.source_document).copied().unwrap_or(0);
-                b_count.cmp(&a_count)
-            });
+            // Print quality diagnostics
+            print_rag_quality_diagnostics(
+                top_chunks.len(),
+                cits.len(),
+                validated_cits_len - cits.len() + (original_cits_len - validated_cits_len),
+                total_sent,
+                kept_sent,
+                removed_sent,
+                &cits,
+            );
+
+            let coverage = if total_sent == 0 { 1.0 } else { kept_sent as f32 / total_sent as f32 };
 
             // Prepend warning if PARTIAL_RETRIEVAL
-            if confidence_report.status == "PARTIAL_RETRIEVAL" {
+            if confidence_report.status == "PARTIAL_RETRIEVAL" && ans != "I found relevant information but could not verify supporting sources." && !is_comparison_fallback {
                 ans = format!(
                     "⚠️ This answer may be incomplete because only part of the requested information was found.\n\n{}",
                     ans
@@ -929,21 +958,32 @@ impl RetrievalService {
             let reranked = self.reranker_service.rerank(query, retrieval_results, 10).await?;
             let top_chunks: Vec<RetrievedChunk> = reranked.into_iter().take(3).collect();
             let built_context = self.context_builder.build(top_chunks.clone());
-            let answer = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
-            let mut citations: Vec<Citation> = top_chunks.iter().map(|c| {
+            let raw_answer = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
+
+            let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks).await?;
+
+            let mut raw_citations: Vec<Citation> = top_chunks.iter().map(|c| {
                 let section = c.metadata.get("section")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 let evidence = extract_evidence(&c.content, query, &dict);
-                let has_evidence = evidence.is_some();
                 
+                let evidence_snippet = evidence.clone().unwrap_or_else(|| {
+                    let trimmed = c.content.trim();
+                    if trimmed.len() > 160 {
+                        format!("{}...", &trimmed[..160])
+                    } else {
+                        trimmed.to_string()
+                    }
+                });
+
                 let sigmoid = |x: f32| 1.0_f32 / (1.0 + (-x).exp());
                 let sig = sigmoid(c.score);
                 
                 let anchors = extract_factual_anchors(&answer);
                 let match_count = anchors.iter().filter(|a| c.content.to_lowercase().contains(&a.to_lowercase())).count();
                 
-                let evidence_level = if has_evidence && (match_count >= 2 || sig >= 0.75) {
+                let evidence_level = if match_count >= 2 || sig >= 0.75 {
                     "High Evidence".to_string()
                 } else if match_count >= 1 || sig >= 0.45 {
                     "Medium Evidence".to_string()
@@ -958,10 +998,10 @@ impl RetrievalService {
                     retrieval_score: c.retrieval_score,
                     rerank_score: c.score,
                     section,
-                    evidence: evidence.clone(),
+                    evidence: Some(evidence_snippet.clone()),
                     evidence_level: Some(evidence_level),
                     document_title: clean_document_title(&c.document_title),
-                    evidence_snippet: evidence.clone(),
+                    evidence_snippet: Some(evidence_snippet),
                     source_connector: c.source.clone(),
                     source: c.source.clone(),
                     document_id: c.document_id.clone(),
@@ -969,36 +1009,30 @@ impl RetrievalService {
                 }
             }).collect();
 
-            let mut doc_counts = HashMap::new();
-            for cit in &citations {
-                *doc_counts.entry(cit.source_document.clone()).or_insert(0) += 1;
+            // Validate citations
+            let original_cits_len = raw_citations.len();
+            raw_citations.retain(|cit| validate_citation_source(database, cit, &top_chunks));
+            let validated_cits_len = raw_citations.len();
+
+            // Deduplicate and sort citations
+            let citations = deduplicate_and_sort_citations(raw_citations);
+
+            // Citation Success Gate
+            if !answer.is_empty() && citations.is_empty() {
+                answer = "I found relevant information but could not verify supporting sources.".to_string();
             }
 
-            citations.sort_by(|a, b| {
-                let level_score = |level: &Option<String>| match level.as_deref() {
-                    Some("High Evidence") => 3,
-                    Some("Medium Evidence") => 2,
-                    Some("Supporting Evidence") => 1,
-                    _ => 0,
-                };
-                
-                let a_level = level_score(&a.evidence_level);
-                let b_level = level_score(&b.evidence_level);
-                
-                if a_level != b_level {
-                    return b_level.cmp(&a_level);
-                }
-                
-                if let Some(ord) = b.rerank_score.partial_cmp(&a.rerank_score) {
-                    if ord != std::cmp::Ordering::Equal {
-                        return ord;
-                    }
-                }
-                
-                let a_count = doc_counts.get(&a.source_document).copied().unwrap_or(0);
-                let b_count = doc_counts.get(&b.source_document).copied().unwrap_or(0);
-                b_count.cmp(&a_count)
-            });
+            // Print quality diagnostics
+            print_rag_quality_diagnostics(
+                top_chunks.len(),
+                citations.len(),
+                validated_cits_len - citations.len() + (original_cits_len - validated_cits_len),
+                total_sent,
+                kept_sent,
+                removed_sent,
+                &citations,
+            );
+
             let confidence_report = crate::domain::ConfidenceReport {
                 confidence: "high".to_string(),
                 confidence_score: 85,
@@ -1073,35 +1107,41 @@ impl RetrievalService {
             strategy: RetrievalStrategy::Hybrid,
         };
 
-        let answer = self
+        let raw_answer = self
             .generate_answer(query, &dummy_analysis, &built_context)
             .await?;
 
+        let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks).await?;
+
         // Step 6: Build citations for all contributing docs
         let dict = self.entity_dictionary.read().await;
-        let mut citations: Vec<Citation> = top_chunks
+        let mut raw_citations: Vec<Citation> = top_chunks
             .iter()
             .map(|chunk| {
                 let section = chunk.metadata.get("section")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 let evidence = extract_evidence(&chunk.content, query, &dict);
-                let has_evidence = evidence.is_some();
                 
+                let evidence_snippet = evidence.clone().unwrap_or_else(|| {
+                    let trimmed = chunk.content.trim();
+                    if trimmed.len() > 160 {
+                        format!("{}...", &trimmed[..160])
+                    } else {
+                        trimmed.to_string()
+                    }
+                });
+
                 let sigmoid = |x: f32| 1.0_f32 / (1.0 + (-x).exp());
                 let sig = sigmoid(chunk.score);
                 
                 let anchors = extract_factual_anchors(&answer);
                 let match_count = anchors.iter().filter(|a| chunk.content.to_lowercase().contains(&a.to_lowercase())).count();
                 
-                let evidence_level = if has_evidence {
-                    if match_count >= 2 || sig >= 0.75 {
-                        "High Evidence".to_string()
-                    } else if match_count >= 1 || sig >= 0.45 {
-                        "Medium Evidence".to_string()
-                    } else {
-                        "Supporting Evidence".to_string()
-                    }
+                let evidence_level = if match_count >= 2 || sig >= 0.75 {
+                    "High Evidence".to_string()
+                } else if match_count >= 1 || sig >= 0.45 {
+                    "Medium Evidence".to_string()
                 } else {
                     "Supporting Evidence".to_string()
                 };
@@ -1113,10 +1153,10 @@ impl RetrievalService {
                     retrieval_score: chunk.retrieval_score,
                     rerank_score: chunk.score,
                     section,
-                    evidence: evidence.clone(),
-                    evidence_level: Some(evidence_level.clone()),
+                    evidence: Some(evidence_snippet.clone()),
+                    evidence_level: Some(evidence_level),
                     document_title: clean_document_title(&chunk.document_title),
-                    evidence_snippet: evidence.clone(),
+                    evidence_snippet: Some(evidence_snippet),
                     source_connector: chunk.source.clone(),
                     source: chunk.source.clone(),
                     document_id: chunk.document_id.clone(),
@@ -1125,36 +1165,29 @@ impl RetrievalService {
             })
             .collect();
 
-        let mut doc_counts = HashMap::new();
-        for cit in &citations {
-            *doc_counts.entry(cit.source_document.clone()).or_insert(0) += 1;
+        // Validate citations
+        let original_cits_len = raw_citations.len();
+        raw_citations.retain(|cit| validate_citation_source(database, cit, &top_chunks));
+        let validated_cits_len = raw_citations.len();
+
+        // Deduplicate and sort citations
+        let citations = deduplicate_and_sort_citations(raw_citations);
+
+        // Citation Success Gate
+        if !answer.is_empty() && citations.is_empty() {
+            answer = "I found relevant information but could not verify supporting sources.".to_string();
         }
 
-        citations.sort_by(|a, b| {
-            let level_score = |level: &Option<String>| match level.as_deref() {
-                Some("High Evidence") => 3,
-                Some("Medium Evidence") => 2,
-                Some("Supporting Evidence") => 1,
-                _ => 0,
-            };
-            
-            let a_level = level_score(&a.evidence_level);
-            let b_level = level_score(&b.evidence_level);
-            
-            if a_level != b_level {
-                return b_level.cmp(&a_level);
-            }
-            
-            if let Some(ord) = b.rerank_score.partial_cmp(&a.rerank_score) {
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            
-            let a_count = doc_counts.get(&a.source_document).copied().unwrap_or(0);
-            let b_count = doc_counts.get(&b.source_document).copied().unwrap_or(0);
-            b_count.cmp(&a_count)
-        });
+        // Print quality diagnostics
+        print_rag_quality_diagnostics(
+            top_chunks.len(),
+            citations.len(),
+            validated_cits_len - citations.len() + (original_cits_len - validated_cits_len),
+            total_sent,
+            kept_sent,
+            removed_sent,
+            &citations,
+        );
 
         tracing::info!(
             "[BROAD_TOPIC] Synthesized answer for cluster={:?} using {} chunks from {} docs",
@@ -1174,7 +1207,7 @@ impl RetrievalService {
             answer,
             citations,
             confidence: Some(confidence_report),
-            diagnostics: None, // Diagnostics panel deferred (no telemetry row for synthesis)
+            diagnostics: None,
         })
     }
 
@@ -1758,21 +1791,55 @@ impl RetrievalService {
         let rerank_limit = candidate_chunks_diverse.len().min(60);
         let mut reranked = self.reranker_service.rerank(query, candidate_chunks_diverse, rerank_limit).await?;
 
+        // --- BOOST_AUDIT: snapshot pre-boost scores for adaptive floor computation ---
+        let pre_boost_scores: Vec<f32> = reranked.iter().map(|c| c.score).collect();
+        let p50_floor = {
+            let mut s = pre_boost_scores.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = s.len();
+            let p50 = s.get(n / 2).copied().unwrap_or(0.0_f32);
+            let p75 = s.get((n * 3) / 4).copied().unwrap_or(0.0_f32);
+            let p90 = s.get((n * 9) / 10).copied().unwrap_or(0.0_f32);
+            tracing::info!(
+                "[BOOST_AUDIT] Pre-boost score distribution: p50={:.4} p75={:.4} p90={:.4} n={}",
+                p50, p75, p90, n
+            );
+            p50
+        };
+
+        // Determine if this is a comparison query (uses entity density instead of frequency boosts)
+        let is_comparison_intent =
+            determine_query_intent(query, analysis, &dict) == QueryIntentType::Comparison;
+
+        // Maximum total boost any single chunk can receive from recursive signals
+        const MAX_RECURSIVE_BOOST: f32 = 10.0;
+
         if query_entities.len() >= 2 {
-            for chunk in &mut reranked {
-                let coverage = cross_document_entity_coverage(chunk, &query_entities, &dict);
-                if coverage >= 0.99 {
-                    chunk.score += 8.0;
+            for (i, chunk) in reranked.iter_mut().enumerate() {
+                let pre_boost = pre_boost_scores.get(i).copied().unwrap_or(chunk.score);
+
+                // Adaptive floor: only boost chunks above the median reranker score.
+                // Scale-neutral — works regardless of whether scores are logits, sigmoids, or RRF.
+                if pre_boost < p50_floor {
                     tracing::info!(
-                        "[RECURSIVE] Applied boost +8.0 to chunk={} ({}) for entity coverage {:.2}",
-                        chunk.chunk_id, chunk.document_title, coverage
+                        "[BOOST_AUDIT] doc=\"{}\" pre={:.4} SKIPPED (below p50={:.4})",
+                        chunk.document_title, pre_boost, p50_floor
                     );
+                    continue;
+                }
+
+                let coverage = cross_document_entity_coverage(chunk, &query_entities, &dict);
+                let mut total_boost = 0.0_f32;
+
+                if coverage >= 0.99 {
+                    total_boost += 5.0; // base coverage boost (reduced from +8.0)
 
                     let content_lower = chunk.content.to_lowercase();
                     let title_lower = chunk.document_title.to_lowercase();
                     let text = format!("{} {}", content_lower, title_lower);
-                    let mut strong_matches = 0;
-                    let mut total_mentions = 0;
+
+                    let mut strong_matches = 0_usize;
+                    let mut total_mentions = 0_usize;
                     for entity_name in &query_entities {
                         if let Some(group) = dict.groups.iter().find(|g| &g.name == entity_name) {
                             let mentions = count_entity_mentions(&text, group);
@@ -1782,34 +1849,64 @@ impl RetrievalService {
                             }
                         }
                     }
-                    if strong_matches > 0 {
-                        let freq_boost = strong_matches as f32 * 4.0;
-                        chunk.score += freq_boost;
+
+                    if is_comparison_intent {
+                        // Comparison queries: use entity density = mentions / total_tokens.
+                        // Integration docs (high density) beat onboarding docs (low density)
+                        // even when both mention the entities.
+                        let word_count = text.split_whitespace().count().max(1) as f32;
+                        let density = total_mentions as f32 / word_count;
+                        let density_boost = (density * 20.0_f32).min(5.0_f32);
+                        total_boost += density_boost;
+                    } else {
+                        // Non-comparison: frequency and mention boosts (halved from original)
+                        if strong_matches > 0 {
+                            total_boost += (strong_matches as f32 * 2.0_f32).min(4.0_f32);
+                        }
+                        if total_mentions > 0 {
+                            total_boost += (total_mentions as f32 * 0.5_f32).min(2.0_f32);
+                        }
                     }
-                    if total_mentions > 0 {
-                        let mention_boost = total_mentions as f32 * 1.5;
-                        chunk.score += mention_boost;
-                    }
-                    let section_density = calculate_entity_section_density(&chunk.content, &query_entities, &dict);
+
+                    // Section density boost (halved from density * 8.0)
+                    let section_density =
+                        calculate_entity_section_density(&chunk.content, &query_entities, &dict);
                     if section_density > 0.0 {
-                        let section_boost = section_density * 8.0;
-                        chunk.score += section_boost;
+                        total_boost += (section_density * 4.0_f32).min(4.0_f32);
                     }
                 } else if coverage >= 0.49 {
-                    chunk.score += 2.0;
+                    total_boost += 1.0_f32; // partial coverage (reduced from +2.0)
                 }
+
+                // Cap total contribution from recursive signals per chunk
+                total_boost = total_boost.min(MAX_RECURSIVE_BOOST);
+                chunk.score += total_boost;
+
+                tracing::info!(
+                    "[BOOST_AUDIT] doc=\"{}\" pre={:.4} post={:.4} added={:.4} coverage={:.2}",
+                    chunk.document_title, pre_boost, chunk.score, total_boost, coverage
+                );
             }
         }
 
         if targets.len() >= 2 {
             let target_x = &targets[0];
             let target_y = &targets[1];
-            for chunk in &mut reranked {
+            for (i, chunk) in reranked.iter_mut().enumerate() {
+                let pre_boost = pre_boost_scores.get(i).copied().unwrap_or(chunk.score);
+
+                // Only bridge-boost chunks that are above the adaptive floor
+                if pre_boost < p50_floor {
+                    continue;
+                }
+
                 if mentions_both_targets(chunk, target_x, target_y, &dict) {
-                    chunk.score += 15.0;
+                    // Proportional bridge boost, capped at +5.0 (was hardcoded +15.0)
+                    let bridge_boost = (pre_boost * 0.15_f32).min(5.0_f32);
+                    chunk.score += bridge_boost;
                     tracing::info!(
-                        "[RECURSIVE] Applied bridge target boost +15.0 to chunk={} ({})",
-                        chunk.chunk_id, chunk.document_title
+                        "[RECURSIVE] Applied bridge boost +{:.2} to chunk=\"{}\" (pre={:.4})",
+                        bridge_boost, chunk.document_title, pre_boost
                     );
                 }
             }
@@ -2129,6 +2226,251 @@ fn determine_query_intent(query: &str, analysis: &QueryAnalysis, entity_dict: &E
     }
 }
 
+fn print_rag_quality_diagnostics(
+    retrieved_docs: usize,
+    unique_docs: usize,
+    duplicate_removed: usize,
+    ans_sentences: usize,
+    verified_sentences: usize,
+    removed_sentences: usize,
+    citations: &[Citation],
+) {
+    let mut high = 0;
+    let mut medium = 0;
+    let mut supporting = 0;
+    for cit in citations {
+        match cit.evidence_level.as_deref() {
+            Some("High Evidence") => high += 1,
+            Some("Medium Evidence") => medium += 1,
+            Some("Supporting Evidence") => supporting += 1,
+            _ => {}
+        }
+    }
+    tracing::info!(
+        "\n[RAG_QUALITY]\nRetrieved Docs: {}\nUnique Docs: {}\nDuplicate Docs Removed: {}\nAnswer Sentences: {}\nVerified Sentences: {}\nRemoved Sentences: {}\nHigh Evidence: {}\nMedium Evidence: {}\nSupporting Evidence: {}",
+        retrieved_docs,
+        unique_docs,
+        duplicate_removed,
+        ans_sentences,
+        verified_sentences,
+        removed_sentences,
+        high,
+        medium,
+        supporting
+    );
+}
+
+fn extract_name_from_path(path_or_url: &str) -> Option<String> {
+    if path_or_url.is_empty() {
+        return None;
+    }
+    let segment = path_or_url
+        .split('/')
+        .last()?
+        .split('\\')
+        .last()?;
+    if segment.is_empty() {
+        return None;
+    }
+    let segment_clean = segment.split('?').next()?.split('#').next()?;
+    if segment_clean.is_empty() {
+        return None;
+    }
+    let name = if let Some(stripped) = segment_clean.strip_suffix(".md") {
+        stripped
+    } else if let Some(stripped) = segment_clean.strip_suffix(".markdown") {
+        stripped
+    } else if let Some(stripped) = segment_clean.strip_suffix(".txt") {
+        stripped
+    } else if let Some(stripped) = segment_clean.strip_suffix(".pdf") {
+        stripped
+    } else if let Some(stripped) = segment_clean.strip_suffix(".json") {
+        stripped
+    } else if let Some(stripped) = segment_clean.strip_suffix(".html") {
+        stripped
+    } else {
+        segment_clean
+    };
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn validate_citation_source(database: &Database, citation: &Citation, top_chunks: &[RetrievedChunk]) -> bool {
+    let mut valid = true;
+    let mut reason = "None".to_string();
+
+    // 1. Evidence snippet verification
+    if let Some(snippet) = &citation.evidence {
+        if !snippet.is_empty() {
+            let chunk_opt = top_chunks.iter().find(|c| c.chunk_id == citation.chunk_id);
+            if let Some(chunk) = chunk_opt {
+                if !chunk.content.to_lowercase().contains(&snippet.to_lowercase()) {
+                    valid = false;
+                    reason = format!("Evidence snippet not found in chunk content (snippet: '{}')", snippet);
+                }
+            } else {
+                valid = false;
+                reason = format!("Chunk not found in top_chunks for chunk_id {}", citation.chunk_id);
+            }
+        }
+    }
+
+    // 2. Document/Title verification
+    if valid {
+        let chunk_opt = top_chunks.iter().find(|c| c.chunk_id == citation.chunk_id);
+        if let Some(chunk) = chunk_opt {
+            if chunk.document_id != citation.document_id {
+                valid = false;
+                reason = format!("document_id mismatch: chunk={} vs citation={}", chunk.document_id, citation.document_id);
+            } else {
+                let cleaned_chunk_title = clean_document_title(&chunk.document_title);
+                if cleaned_chunk_title != citation.document_title {
+                    valid = false;
+                    reason = format!("document_title mismatch: chunk (cleaned)='{}' vs citation='{}'", cleaned_chunk_title, citation.document_title);
+                }
+            }
+        } else {
+            valid = false;
+            reason = format!("Chunk not found for id {}", citation.chunk_id);
+        }
+    }
+
+    // 3. Database verification
+    if valid {
+        match database.document_repository().get_document_by_id(&citation.document_id) {
+            Ok(Some(doc)) => {
+                if doc.source_kind != citation.source_type {
+                    valid = false;
+                    reason = format!("source_type mismatch in DB: doc.source_kind={} vs citation.source_type={}", doc.source_kind, citation.source_type);
+                }
+            }
+            Ok(None) => {
+                valid = false;
+                reason = format!("Document not found in database for ID {}", citation.document_id);
+            }
+            Err(e) => {
+                valid = false;
+                reason = format!("Database error looking up document {}: {}", citation.document_id, e);
+            }
+        }
+    }
+
+    let evidence_len = citation.evidence.as_ref().map(|s| s.len()).unwrap_or(0);
+    tracing::info!(
+        "\n[CITATION_DEBUG]\ndoc_id={}\ntitle={}\nevidence_length={}\nvalidation_result={}\nrejection_reason={}",
+        citation.document_id,
+        citation.document_title,
+        evidence_len,
+        valid,
+        reason
+    );
+
+    valid
+}
+
+fn deduplicate_and_sort_citations(citations: Vec<Citation>) -> Vec<Citation> {
+    let mut deduped_map: HashMap<String, Vec<Citation>> = HashMap::new();
+    let mut doc_order = Vec::new();
+
+    for cit in citations {
+        let doc_id = cit.document_id.clone();
+        if !deduped_map.contains_key(&doc_id) {
+            doc_order.push(doc_id.clone());
+        }
+        deduped_map.entry(doc_id).or_default().push(cit);
+    }
+
+    let mut result = Vec::new();
+    for doc_id in doc_order {
+        let group = deduped_map.remove(&doc_id).unwrap();
+        if group.is_empty() {
+            continue;
+        }
+
+        let level_val = |level: &Option<String>| match level.as_deref() {
+            Some("High Evidence") => 3,
+            Some("Medium Evidence") => 2,
+            Some("Supporting Evidence") => 1,
+            _ => 0,
+        };
+
+        // Find the best citation in the group
+        let mut best_cit = group[0].clone();
+        for cit in group.iter().skip(1) {
+            let best_lvl = level_val(&best_cit.evidence_level);
+            let cit_lvl = level_val(&cit.evidence_level);
+            if cit_lvl > best_lvl || (cit_lvl == best_lvl && cit.rerank_score > best_cit.rerank_score) {
+                best_cit = cit.clone();
+            }
+        }
+
+        // Merge sections
+        let mut sections = Vec::new();
+        for cit in &group {
+            if let Some(sec) = &cit.section {
+                let trimmed = sec.trim();
+                if !trimmed.is_empty() && !sections.contains(&trimmed.to_string()) {
+                    sections.push(trimmed.to_string());
+                }
+            }
+        }
+        best_cit.section = if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join(", "))
+        };
+
+        // Merge evidence snippets
+        let mut evidence_parts = Vec::new();
+        for cit in &group {
+            if let Some(ev) = &cit.evidence {
+                let trimmed = ev.trim();
+                if !trimmed.is_empty() && !evidence_parts.contains(&trimmed.to_string()) {
+                    evidence_parts.push(trimmed.to_string());
+                }
+            }
+        }
+        let merged_evidence = if evidence_parts.is_empty() {
+            None
+        } else {
+            Some(evidence_parts.join("\n\n"))
+        };
+        best_cit.evidence = merged_evidence.clone();
+        best_cit.evidence_snippet = merged_evidence;
+
+        // Max scores
+        best_cit.retrieval_score = group.iter().filter_map(|c| c.retrieval_score).max_by(|a, b| a.partial_cmp(b).unwrap());
+        best_cit.rerank_score = group.iter().map(|c| c.rerank_score).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+        best_cit.score = group.iter().map(|c| c.score).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+
+        result.push(best_cit);
+    }
+
+    // Sort citations: High -> Medium -> Supporting, then by rerank_score descending.
+    result.sort_by(|a, b| {
+        let level_score = |level: &Option<String>| match level.as_deref() {
+            Some("High Evidence") => 3,
+            Some("Medium Evidence") => 2,
+            Some("Supporting Evidence") => 1,
+            _ => 0,
+        };
+
+        let a_lvl = level_score(&a.evidence_level);
+        let b_lvl = level_score(&b.evidence_level);
+
+        if a_lvl != b_lvl {
+            b_lvl.cmp(&a_lvl)
+        } else {
+            b.rerank_score.partial_cmp(&a.rerank_score).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+
+    result
+}
+
 fn hydrate_chunk_ids(database: &Database, ordered_chunk_ids: &[String]) -> Result<Vec<RetrievedChunk>> {
     let rows = database
         .document_repository()
@@ -2151,15 +2493,62 @@ fn hydrate_chunk_ids(database: &Database, ordered_chunk_ids: &[String]) -> Resul
                     }
                 }
             }
+
+            let resolved_title = {
+                // 1. chunk.document_title (chunk metadata title)
+                let chunk_title = row.chunk_metadata_json.as_ref()
+                    .and_then(|json_str| serde_json::from_str::<Value>(json_str).ok())
+                    .and_then(|val| {
+                        val.get("document_title")
+                            .or_else(|| val.get("documentTitle"))
+                            .or_else(|| val.get("title"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    });
+
+                // 2. SQLite title lookup (row.title)
+                let sqlite_title = if !row.title.is_empty() {
+                    Some(row.title.clone())
+                } else {
+                    None
+                };
+
+                // 3. metadata.title (row.metadata)
+                let metadata_title = row.metadata.get("title")
+                    .or_else(|| row.metadata.get("document_title"))
+                    .or_else(|| row.metadata.get("documentTitle"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // 4. document name extracted from source path
+                let path_title = row.path_or_url.as_ref().and_then(|p| extract_name_from_path(p));
+
+                let is_placeholder = |t: &str| {
+                    let t_lower = t.to_lowercase();
+                    t_lower.contains("untitled document") || 
+                    t_lower == "untitled" || 
+                    (t_lower.starts_with("document ") && t_lower.len() > 9 && t_lower[9..].chars().all(|c| c.is_ascii_hexdigit()))
+                };
+
+                let check_and_resolve = |t: Option<String>| {
+                    t.filter(|val| !val.is_empty() && !is_placeholder(val))
+                };
+
+                check_and_resolve(chunk_title)
+                    .or_else(|| check_and_resolve(sqlite_title))
+                    .or_else(|| check_and_resolve(metadata_title))
+                    .or_else(|| check_and_resolve(path_title))
+                    .unwrap_or_else(|| {
+                        // 5. document_id (LAST fallback only)
+                        row.document_id.clone()
+                    })
+            };
+
             hydrated.push(RetrievedChunk {
                 chunk_id: row.chunk_id.clone(),
                 document_id: row.document_id.clone(),
                 source: row.source_kind.clone(),
-                document_title: if row.title.is_empty() {
-                    row.document_id.clone()
-                } else {
-                    row.title.clone()
-                },
+                document_title: resolved_title,
                 content: row.content.clone(),
                 score: 0.0,
                 retrieval_score: None,
@@ -2176,6 +2565,267 @@ fn hydrate_chunk_ids(database: &Database, ordered_chunk_ids: &[String]) -> Resul
     }
 
     Ok(hydrated)
+}
+
+fn tokenize_text(text: &str) -> HashSet<String> {
+    let stop_words: HashSet<&str> = [
+        "what", "is", "the", "does", "how", "to", "explain", "describe", "about",
+        "system", "use", "connect", "with", "and", "or", "a", "an", "of",
+        "which", "where", "that", "this", "for", "from", "are", "was", "were",
+        "has", "have", "had", "can", "will", "would", "should", "could", "in", "on",
+        "but", "as", "at", "by", "against", "between",
+        "into", "through", "during", "before", "after", "above", "below",
+        "up", "down", "out", "off", "over", "under", "again",
+        "further", "then", "once", "here", "there", "when", "why", "all",
+        "any", "both", "each", "few", "more", "most", "other", "some", "such",
+        "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+        "s", "t", "just", "don", "now", "i", "me", "my", "myself", "we", "our",
+        "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
+        "he", "him", "his", "himself", "she", "her", "hers", "herself", "it",
+        "its", "itself", "they", "them", "their", "theirs", "themselves",
+        "these", "those", "am", "been", "being", "be", "do", "does", "did", "doing"
+    ].iter().cloned().collect();
+
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !stop_words.contains(s.as_str()) && s.len() > 2)
+        .collect()
+}
+
+fn extract_comparison_entities(query: &str) -> Vec<String> {
+    let q_lower = query.to_lowercase();
+    let mut clean = q_lower;
+    
+    // Replace comparison separators with standard " and "
+    for sep in &[" vs. ", " vs ", " versus ", " compared to ", " difference between ", " pros and cons of "] {
+        clean = clean.replace(sep, " and ");
+    }
+    
+    // Remove query noise words
+    for noise in &["compare ", "compare", "difference ", "difference", "between ", "between", "integrations", "integration", "systems", "system", "platform", "platforms", "?", "."] {
+        clean = clean.replace(noise, "");
+    }
+
+    let parts: Vec<String> = clean
+        .split(|c| c == ',' || c == '/' || c == ';')
+        .flat_map(|s| s.split(" and "))
+        .flat_map(|s| s.split(" or "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() > 2)
+        .collect();
+
+    parts
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    let mut norm_b = 0.0;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        norm_a += a[i] * a[i];
+        norm_b += b[i] * b[i];
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a.sqrt() * norm_b.sqrt())
+    }
+}
+
+enum AnswerLine {
+    CodeBlock(String),
+    Empty,
+    Text {
+        original_prefix: String,
+        sentences: Vec<String>,
+    },
+}
+
+async fn verify_and_ground_answer(
+    ollama_service: &OllamaService,
+    answer: &str,
+    chunks: &[RetrievedChunk],
+) -> Result<(String, usize, usize, usize)> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            lines.push(AnswerLine::CodeBlock(line.to_string()));
+            continue;
+        }
+
+        if in_code_block {
+            lines.push(AnswerLine::CodeBlock(line.to_string()));
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            lines.push(AnswerLine::Empty);
+            continue;
+        }
+
+        let (prefix, content) = if trimmed.starts_with("- ") {
+            ("- ".to_string(), &trimmed[2..])
+        } else if trimmed.starts_with("* ") {
+            ("* ".to_string(), &trimmed[2..])
+        } else if trimmed.starts_with("### ") {
+            ("### ".to_string(), &trimmed[4..])
+        } else if trimmed.starts_with("## ") {
+            ("## ".to_string(), &trimmed[3..])
+        } else if trimmed.starts_with("# ") {
+            ("# ".to_string(), &trimmed[2..])
+        } else {
+            ("".to_string(), trimmed)
+        };
+
+        let mut sentences = Vec::new();
+        let mut current = String::new();
+        let mut chars = content.chars().peekable();
+        while let Some(ch) = chars.next() {
+            current.push(ch);
+            if (ch == '.' || ch == '?' || ch == '!') && (chars.peek().map(|c| c.is_whitespace()).unwrap_or(true)) {
+                let s = current.trim().to_string();
+                if !s.is_empty() {
+                    sentences.push(s);
+                }
+                current.clear();
+            }
+        }
+        let remainder = current.trim().to_string();
+        if !remainder.is_empty() {
+            sentences.push(remainder);
+        }
+
+        lines.push(AnswerLine::Text {
+            original_prefix: prefix,
+            sentences,
+        });
+    }
+
+    let mut candidate_sentences = Vec::new();
+    for line in &lines {
+        if let AnswerLine::Text { sentences, .. } = line {
+            for sentence in sentences {
+                let tokens = tokenize_text(sentence);
+                if !tokens.is_empty() {
+                    candidate_sentences.push(sentence.clone());
+                }
+            }
+        }
+    }
+
+    let mut sentence_embeddings = HashMap::new();
+    let mut chunk_embeddings = Vec::new();
+
+    if !candidate_sentences.is_empty() && !chunks.is_empty() {
+        let mut batch_inputs = candidate_sentences.clone();
+        for chunk in chunks {
+            batch_inputs.push(chunk.content.clone());
+        }
+
+        match ollama_service.generate_embeddings(&batch_inputs).await {
+            Ok(all_embeddings) => {
+                let (sent_embs, chunk_embs) = all_embeddings.split_at(candidate_sentences.len());
+                for (sent, emb) in candidate_sentences.iter().zip(sent_embs) {
+                    sentence_embeddings.insert(sent.clone(), emb.clone());
+                }
+                chunk_embeddings = chunk_embs.to_vec();
+            }
+            Err(err) => {
+                tracing::warn!("[ANSWER_VERIFIER] Failed to generate embeddings via Ollama: {}. Falling back to keyword overlap only.", err);
+            }
+        }
+    }
+
+    let mut total_sentences = 0;
+    let mut kept_sentences = 0;
+    let mut removed_sentences = 0;
+    let mut final_lines = Vec::new();
+
+    for line in lines {
+        match line {
+            AnswerLine::CodeBlock(l) => {
+                final_lines.push(l);
+            }
+            AnswerLine::Empty => {
+                final_lines.push("".to_string());
+            }
+            AnswerLine::Text { original_prefix, sentences } => {
+                let mut verified_sentences = Vec::new();
+                for sentence in sentences {
+                    total_sentences += 1;
+                    let sentence_tokens = tokenize_text(&sentence);
+                    if sentence_tokens.is_empty() {
+                        kept_sentences += 1;
+                        verified_sentences.push(sentence.clone());
+                        tracing::info!(
+                            "[ANSWER_VERIFIER]\nSentence: {}\nSupport Score: 1.0000\nSupported Chunk: None",
+                            sentence
+                        );
+                        continue;
+                    }
+
+                    let mut best_score = 0.0_f32;
+                    let mut best_chunk_id = None;
+
+                    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                        let chunk_tokens = tokenize_text(&chunk.content);
+                        let keyword_overlap = if sentence_tokens.is_empty() {
+                            1.0_f32
+                        } else {
+                            let intersection = sentence_tokens.intersection(&chunk_tokens).count();
+                            intersection as f32 / sentence_tokens.len() as f32
+                        };
+
+                        let semantic_similarity = if let (Some(sent_emb), Some(chunk_emb)) = (
+                            sentence_embeddings.get(&sentence),
+                            chunk_embeddings.get(chunk_idx),
+                        ) {
+                            cosine_similarity(sent_emb, chunk_emb)
+                        } else {
+                            keyword_overlap
+                        };
+
+                        let support_score = 0.7 * semantic_similarity + 0.3 * keyword_overlap;
+                        if support_score > best_score {
+                            best_score = support_score;
+                            best_chunk_id = Some(chunk.chunk_id.clone());
+                        }
+                    }
+
+                    tracing::info!(
+                        "[ANSWER_VERIFIER]\nSentence: {}\nSupport Score: {:.4}\nSupported Chunk: {}",
+                        sentence,
+                        best_score,
+                        best_chunk_id.as_deref().unwrap_or("None")
+                    );
+
+                    if best_score >= 0.55 {
+                        kept_sentences += 1;
+                        verified_sentences.push(sentence);
+                    } else {
+                        removed_sentences += 1;
+                    }
+                }
+
+                if !verified_sentences.is_empty() {
+                    let joined_sentences = verified_sentences.join(" ");
+                    final_lines.push(format!("{}{}", original_prefix, joined_sentences));
+                }
+            }
+        }
+    }
+
+    let final_answer = final_lines.join("\n");
+    Ok((final_answer, total_sentences, kept_sentences, removed_sentences))
 }
 
 // Deterministic Helper Functions
@@ -2277,6 +2927,7 @@ fn extract_evidence(content: &str, query: &str, entity_dict: &EntityDictionary) 
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DocumentAggregation {
     document_id: String,
     document_title: String,
@@ -2995,9 +3646,9 @@ fn extract_factual_anchors(answer: &str) -> Vec<String> {
     anchors
 }
 
-/// Returns the fraction of factual anchors found in the answer that can be
-/// traced verbatim (case-insensitive) to at least one retrieved chunk.
-/// Returns 1.0 if no anchors exist (nothing to verify).
+
+
+#[allow(dead_code)]
 fn verify_answer_against_chunks(answer: &str, chunks: &[RetrievedChunk]) -> f32 {
     let anchors = extract_factual_anchors(answer);
     if anchors.is_empty() {
@@ -3068,6 +3719,70 @@ mod tests {
         assert!((score - (1.0 / 61.0)).abs() < f32::EPSILON);
     }
 
+    #[test]
+    fn test_extract_name_from_path() {
+        assert_eq!(extract_name_from_path("/Users/saumyathacker/Desktop/grafana.md").unwrap(), "grafana");
+        assert_eq!(extract_name_from_path("C:\\Documents\\Prometheus.markdown").unwrap(), "Prometheus");
+        assert_eq!(extract_name_from_path("https://example.com/docs/auth.html?query=1#frag").unwrap(), "auth");
+        assert_eq!(extract_name_from_path("").is_none(), true);
+    }
+
+    #[test]
+    fn test_extract_comparison_entities() {
+        let entities = extract_comparison_entities("Compare Notion and Obsidian integrations");
+        assert!(entities.contains(&"notion".to_string()));
+        assert!(entities.contains(&"obsidian".to_string()));
+
+        let entities2 = extract_comparison_entities("Prometheus vs Grafana");
+        assert!(entities2.contains(&"prometheus".to_string()));
+        assert!(entities2.contains(&"grafana".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicate_and_sort_citations() {
+        let cit1 = Citation {
+            source_document: "Doc A".to_string(),
+            source_type: "obsidian".to_string(),
+            chunk_id: "chunk-1".to_string(),
+            retrieval_score: Some(0.8),
+            rerank_score: 0.8,
+            section: Some("Intro".to_string()),
+            evidence: Some("snippet 1".to_string()),
+            evidence_level: Some("Medium Evidence".to_string()),
+            document_title: "Doc A".to_string(),
+            evidence_snippet: Some("snippet 1".to_string()),
+            source_connector: "obsidian".to_string(),
+            source: "obsidian".to_string(),
+            document_id: "doc-a".to_string(),
+            score: 0.8,
+        };
+
+        let cit2 = Citation {
+            source_document: "Doc A".to_string(),
+            source_type: "obsidian".to_string(),
+            chunk_id: "chunk-2".to_string(),
+            retrieval_score: Some(0.9),
+            rerank_score: 0.9,
+            section: Some("Details".to_string()),
+            evidence: Some("snippet 2".to_string()),
+            evidence_level: Some("High Evidence".to_string()),
+            document_title: "Doc A".to_string(),
+            evidence_snippet: Some("snippet 2".to_string()),
+            source_connector: "obsidian".to_string(),
+            source: "obsidian".to_string(),
+            document_id: "doc-a".to_string(),
+            score: 0.9,
+        };
+
+        let result = deduplicate_and_sort_citations(vec![cit1, cit2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].evidence_level.as_deref().unwrap(), "High Evidence");
+        assert_eq!(result[0].section.as_deref().unwrap(), "Intro, Details");
+        assert!(result[0].evidence.as_deref().unwrap().contains("snippet 1"));
+        assert!(result[0].evidence.as_deref().unwrap().contains("snippet 2"));
+    }
+
+    #[allow(dead_code)]
     fn mock_chunk(doc_id: &str, score: f32, retrieval_score: f32) -> RetrievedChunk {
         RetrievedChunk {
             chunk_id: uuid::Uuid::new_v4().to_string(),
@@ -3088,6 +3803,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn mock_chunk_with_content(doc_id: &str, title: &str, content: &str, score: f32) -> RetrievedChunk {
         RetrievedChunk {
             chunk_id: uuid::Uuid::new_v4().to_string(),
@@ -3108,6 +3824,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn mock_service() -> RetrievalService {
         RetrievalService::new(
             crate::services::ollama::OllamaService::new("http://localhost".to_string(), "emb".to_string()),

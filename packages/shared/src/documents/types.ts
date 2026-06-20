@@ -109,10 +109,10 @@ export const citationSchema = z.object({
   documentId: z.string(),
   chunkId: z.string(),
   score: z.number(),
-  sourceDocument: z.string().optional(),
+  sourceDocument: z.string(),                    // always populated by backend
   sourceType: z.string().optional(),
   retrievalScore: z.number().optional().nullable(),
-  rerankScore: z.number().optional(),
+  rerankScore: z.number(),                       // always populated by backend
   section: z.string().optional().nullable(),
   evidence: z.string().optional().nullable(),
   evidenceLevel: z.string().optional().nullable(),
