@@ -19,8 +19,10 @@ impl DocumentRepository {
         let mut count = 0_i64;
         let connection = self.connection.lock().expect("db lock poisoned");
         for document in documents {
+            let mut metadata = document.metadata.clone();
+            crate::domain::enrich_metadata(&document.title, &document.id, &mut metadata);
             let tags_json = serde_json::to_string(&document.tags)?;
-            let metadata_json = serde_json::to_string(&document.metadata)?;
+            let metadata_json = serde_json::to_string(&metadata)?;
             connection.execute(
                 "INSERT INTO documents (
                   id, source_kind, source_external_id, title, content_markdown, content_plaintext,

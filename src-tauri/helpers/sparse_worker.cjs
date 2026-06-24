@@ -60,24 +60,9 @@ function upsert(documents) {
 function matchesFilters(document, filters) {
   if (!filters) return true;
 
-  if (filters.source?.length) {
-    const source = String(document.source || '').toLowerCase();
-    if (!filters.source.some((item) => source === String(item).toLowerCase())) return false;
-  }
-
   if (filters.author?.length) {
     const author = String(document.author || '').toLowerCase();
     if (!filters.author.some((item) => author.includes(String(item).toLowerCase()))) return false;
-  }
-
-  if (filters.tags?.length) {
-    const tags = String(document.tags || '').toLowerCase();
-    if (!filters.tags.some((item) => tags.includes(String(item).toLowerCase()))) return false;
-  }
-
-  if (filters.category?.length) {
-    const category = String(document.category || '').toLowerCase();
-    if (!filters.category.some((item) => category.includes(String(item).toLowerCase()))) return false;
   }
 
   if (filters.dateRange) {

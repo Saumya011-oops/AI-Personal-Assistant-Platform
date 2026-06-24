@@ -44,7 +44,7 @@ impl QueryAnalyzerService {
     }
 
     async fn request_analysis(&self, query: &str) -> Result<Value> {
-        let system_prompt = "You are a query analysis engine for a retrieval orchestrator. Return strict JSON only with keys: intent, entities, metadataFilters, temporal, complexity, strategy. metadataFilters may contain source, author, tags, category, dateRange { from, to }. Do not include prose. IMPORTANT: Only extract metadataFilters (like tags, category, source) if the user strictly and explicitly requests filtering by them in their query. Do not aggressively guess tags or categories from conversational keywords.";
+        let system_prompt = "You are a query analysis engine for a retrieval orchestrator. Return strict JSON only with keys: intent, entities, metadataFilters, temporal, complexity, strategy. metadataFilters may contain source, author, tags, category, document_type, topic, date_from, date_to. Do not include prose. IMPORTANT: Only extract metadataFilters if the user strictly and explicitly requests filtering by them in their query. date_from and date_to should be in YYYY-MM-DD format based on temporal constraints in the query (e.g. 'since May 2026' -> date_from='2026-05-01').";
         let user_prompt = format!(
             "Analyze this user query for retrieval planning.\nQuery: {query}\nReturn strict JSON."
         );
@@ -53,7 +53,7 @@ impl QueryAnalyzerService {
 
     fn strict_analysis(&self, query: &str, groq_analysis: &Value) -> Result<QueryAnalysis> {
         let normalized = query.to_lowercase();
-        let temporal = groq_analysis
+        let mut temporal = groq_analysis
             .get("temporal")
             .and_then(Value::as_bool)
             .unwrap_or(false)
@@ -65,11 +65,144 @@ impl QueryAnalyzerService {
             tags: self.extract_string_array(groq_analysis, &["metadataFilters", "tags"]),
             category: self.extract_string_array(groq_analysis, &["metadataFilters", "category"]),
             date_range: self.extract_date_range(groq_analysis),
+            document_type: self.extract_string_array(groq_analysis, &["metadataFilters", "document_type"])
+                .or_else(|| self.extract_string_array(groq_analysis, &["metadataFilters", "documentType"])),
+            topic: self.extract_string_array(groq_analysis, &["metadataFilters", "topic"]),
         };
 
         if metadata_filters.author.is_none() {
             metadata_filters.author = self.extract_author_hint(query);
         }
+
+        // Apply regex month range parsing rules
+        let mut from = metadata_filters.date_range.as_ref().and_then(|r| r.from.clone());
+        let mut to = metadata_filters.date_range.as_ref().and_then(|r| r.to.clone());
+
+        let parse_month = |m: &str| -> Option<&'static str> {
+            match m {
+                "jan" | "january" => Some("01"),
+                "feb" | "february" => Some("02"),
+                "mar" | "march" => Some("03"),
+                "apr" | "april" => Some("04"),
+                "may" => Some("05"),
+                "jun" | "june" => Some("06"),
+                "jul" | "july" => Some("07"),
+                "aug" | "august" => Some("08"),
+                "sep" | "september" => Some("09"),
+                "oct" | "october" => Some("10"),
+                "nov" | "november" => Some("11"),
+                "dec" | "december" => Some("12"),
+                _ => None,
+            }
+        };
+
+        let month_last_day = |m: &str, year: &str| -> &'static str {
+            match m {
+                "01" | "03" | "05" | "07" | "08" | "10" | "12" => "31",
+                "04" | "06" | "09" | "11" => "30",
+                "02" => {
+                    if let Ok(y) = year.parse::<i32>() {
+                        if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                            "29"
+                        } else {
+                            "28"
+                        }
+                    } else {
+                        "28"
+                    }
+                }
+                _ => "30",
+            }
+        };
+
+        if let Some(caps) = Regex::new(r"(?i)(?:since|after)\s+([a-z]+)\s+(\d{4})")
+            .unwrap()
+            .captures(&normalized)
+        {
+            let m_str = caps.get(1).unwrap().as_str();
+            let y_str = caps.get(2).unwrap().as_str();
+            if let Some(mm) = parse_month(m_str) {
+                from = Some(format!("{}-{}-01", y_str, mm));
+            }
+        }
+
+        if let Some(caps) = Regex::new(r"(?i)(?:before|until)\s+([a-z]+)\s+(\d{4})")
+            .unwrap()
+            .captures(&normalized)
+        {
+            let m_str = caps.get(1).unwrap().as_str();
+            let y_str = caps.get(2).unwrap().as_str();
+            if let Some(mm) = parse_month(m_str) {
+                to = Some(format!("{}-{}-01", y_str, mm));
+            }
+        }
+
+        if let Some(caps) = Regex::new(r"(?i)between\s+([a-z]+)\s+and\s+([a-z]+)\s+(\d{4})")
+            .unwrap()
+            .captures(&normalized)
+        {
+            let m1_str = caps.get(1).unwrap().as_str();
+            let m2_str = caps.get(2).unwrap().as_str();
+            let y_str = caps.get(3).unwrap().as_str();
+            if let (Some(mm1), Some(mm2)) = (parse_month(m1_str), parse_month(m2_str)) {
+                from = Some(format!("{}-{}-01", y_str, mm1));
+                to = Some(format!("{}-{}-{}", y_str, mm2, month_last_day(mm2, y_str)));
+            }
+        }
+
+        if from.is_some() || to.is_some() {
+            metadata_filters.date_range = Some(MetadataDateRange { from, to });
+            temporal = true;
+        }
+
+        // Controlled vocabulary rules for document_type fallback
+        if metadata_filters.document_type.is_none() {
+            let res = crate::domain::normalize_document_type(&normalized);
+            if res != "other" {
+                metadata_filters.document_type = Some(vec![res]);
+            }
+        }
+
+        // Rule-based fallback for topic matching
+        if metadata_filters.topic.is_none() {
+            if let Some(caps) = Regex::new(r"(?i)(?:for|about)\s+([a-z\s]+?)(?:\s+written\s+by|\s+from|\s+since|\s+before|\?|$)")
+                .unwrap()
+                .captures(&normalized)
+            {
+                let t_str = caps.get(1).unwrap().as_str().trim().to_string();
+                if !t_str.is_empty() && t_str.split_whitespace().count() <= 4 {
+                    metadata_filters.topic = Some(vec![crate::domain::normalize_topic(&t_str)]);
+                }
+            }
+        }
+
+        // Normalize all document types and topics according to the controlled vocabulary
+        if let Some(ref mut doc_types) = metadata_filters.document_type {
+            for dt in doc_types.iter_mut() {
+                *dt = crate::domain::normalize_document_type(dt);
+            }
+        }
+        if let Some(ref mut topics) = metadata_filters.topic {
+            for t in topics.iter_mut() {
+                *t = crate::domain::normalize_topic(t);
+            }
+        }
+
+        // Telemetry log for facet extraction
+        println!("[FACET_EXTRACTION]");
+        println!("query=\"{}\"", query);
+        println!();
+        println!("author={}", metadata_filters.author.as_ref().map(|v| v.join(", ")).unwrap_or_else(|| "None".to_string()));
+        println!("document_type={}", metadata_filters.document_type.as_ref().map(|v| v.join(", ")).unwrap_or_else(|| "None".to_string()));
+        println!("topic={}", metadata_filters.topic.as_ref().map(|v| v.join(", ")).unwrap_or_else(|| "None".to_string()));
+        if let Some(ref range) = metadata_filters.date_range {
+            println!("date_from={}", range.from.as_deref().unwrap_or("None"));
+            println!("date_to={}", range.to.as_deref().unwrap_or("None"));
+        } else {
+            println!("date_from=None");
+            println!("date_to=None");
+        }
+        println!();
 
         let entities = self.extract_entities(query, groq_analysis);
         let complexity = if self.is_complex_query(&normalized) {
@@ -242,17 +375,21 @@ impl QueryAnalyzerService {
     }
 
     fn extract_date_range(&self, groq_analysis: &Value) -> Option<MetadataDateRange> {
-        let Some(value) = groq_analysis
-            .get("metadataFilters")
-            .and_then(|value| value.get("dateRange"))
-        else {
-            return None;
-        };
+        let filters = groq_analysis.get("metadataFilters");
+        let from = filters
+            .and_then(|f| f.get("date_from").or_else(|| f.get("dateFrom")).or_else(|| f.get("dateRange").and_then(|r| r.get("from"))))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let to = filters
+            .and_then(|f| f.get("date_to").or_else(|| f.get("dateTo")).or_else(|| f.get("dateRange").and_then(|r| r.get("to"))))
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
-        Some(MetadataDateRange {
-            from: value.get("from").and_then(Value::as_str).map(str::to_string),
-            to: value.get("to").and_then(Value::as_str).map(str::to_string),
-        })
+        if from.is_some() || to.is_some() {
+            Some(MetadataDateRange { from, to })
+        } else {
+            None
+        }
     }
 
     fn extract_string_array(&self, value: &Value, path: &[&str]) -> Option<Vec<String>> {

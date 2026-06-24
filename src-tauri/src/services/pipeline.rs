@@ -151,16 +151,19 @@ impl PipelineService {
             embeddings.extend(batch_embeddings);
         }
 
+        let mut document_metadata = document.metadata.clone();
+        crate::domain::enrich_metadata(&document.title, &document.id, &mut document_metadata);
+
         // 5. Build Qdrant points with payload metadata
         let qdrant_points: Vec<QdrantPoint> = embeddable_chunks
             .iter()
             .zip(embeddings.into_iter())
             .map(|(chunk, vector)| {
                 let chunk_metadata: serde_json::Value = chunk
-                    .metadata_json
-                    .as_ref()
-                    .and_then(|json_str| serde_json::from_str(json_str).ok())
-                    .unwrap_or(serde_json::json!({}));
+                     .metadata_json
+                     .as_ref()
+                     .and_then(|json_str| serde_json::from_str(json_str).ok())
+                     .unwrap_or(serde_json::json!({}));
 
                 QdrantPoint {
                     id: chunk.id.clone(),
@@ -169,8 +172,10 @@ impl PipelineService {
                         "chunk_id": chunk.id.clone(),
                         "document_id": chunk.document_id.clone(),
                         "source": document.source_kind.clone(),
-                        "author": document.metadata.get("author").and_then(|value| value.as_str()).map(|s| s.to_lowercase()),
-                        "category": document.metadata.get("category").and_then(|value| value.as_str()).map(|s| s.to_lowercase()),
+                        "author": document_metadata.get("author").and_then(|value| value.as_str()).map(|s| s.to_lowercase()),
+                        "category": document_metadata.get("category").and_then(|value| value.as_str()).map(|s| s.to_lowercase()),
+                        "document_type": document_metadata.get("document_type").and_then(|value| value.as_str()).map(|s| s.to_lowercase()),
+                        "topic": document_metadata.get("topic").and_then(|value| value.as_str()).map(|s| s.to_lowercase()),
                         "title": document.title.clone(),
                         "content": chunk.content.clone(),
                         "ordinal": chunk.ordinal,
@@ -178,7 +183,7 @@ impl PipelineService {
                         "created_at": document.created_at.clone(),
                         "modified_at": document.updated_at.clone(),
                         "tags": document.tags.iter().map(|t| t.to_lowercase()).collect::<Vec<_>>(),
-                        "metadata": document.metadata.clone(),
+                        "metadata": document_metadata.clone(),
                         // Upgraded Chunk Metadata
                         "parent_id": chunk.parent_id.clone(),
                         "summary": chunk.summary.clone(),
@@ -223,19 +228,17 @@ impl PipelineService {
                     content,
                     path_or_url: document.path_or_url.clone(),
                     tags: document.tags.clone(),
-                    author: document
-                        .metadata
+                    author: document_metadata
                         .get("author")
                         .and_then(|value| value.as_str())
                         .map(str::to_string),
-                    category: document
-                        .metadata
+                    category: document_metadata
                         .get("category")
                         .and_then(|value| value.as_str())
                         .map(str::to_string),
                     created_at: document.created_at.clone(),
                     updated_at: document.updated_at.clone(),
-                    metadata: document.metadata.clone(),
+                    metadata: document_metadata.clone(),
                     chunk_metadata_json: chunk.metadata_json.clone(),
                 }
             })

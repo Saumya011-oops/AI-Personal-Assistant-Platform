@@ -218,6 +218,8 @@ async fn main() -> Result<()> {
             tags: Some(vec!["troubleshooting".to_string()]),
             category: Some(vec!["support".to_string()]),
             date_range: None,
+            document_type: None,
+            topic: None,
         },
     ).await?;
 

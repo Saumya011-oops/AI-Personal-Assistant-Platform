@@ -508,6 +508,17 @@ impl EntityDictionary {
                 score += 6;
             }
 
+            let mut matched_specific = false;
+            for t in &group.specific_terms {
+                if query_lower.contains(&t.to_lowercase()) {
+                    matched_specific = true;
+                    break;
+                }
+            }
+            if matched_specific {
+                score += 5;
+            }
+
             let mut expansion_matches = 0;
             for t in &group.expansion_terms {
                 if query_lower.contains(&t.to_lowercase()) {

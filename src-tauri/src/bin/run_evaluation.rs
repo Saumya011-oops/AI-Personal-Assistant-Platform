@@ -428,8 +428,9 @@ async fn main() -> Result<()> {
     println!("Saved evaluation report to: {}", report_path);
 
     // Also write to the artifacts directory so the user gets it
-    let artifact_dir = "/Users/saumyathacker/.gemini/antigravity/brain/ab9a6414-1b35-4165-99f9-f18c04a4acb7";
-    let artifact_report_path = Path::new(artifact_dir).join("evaluation_report.md");
+    let artifact_dir = std::env::var("RAG_EVAL_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "src-tauri".to_string());
+    let artifact_report_path = Path::new(&artifact_dir).join("evaluation_report.md");
     let mut artifact_file = File::create(artifact_report_path)?;
     artifact_file.write_all(report_md.as_bytes())?;
     println!("Saved evaluation report to artifacts directory.");

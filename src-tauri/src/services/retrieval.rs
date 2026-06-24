@@ -236,12 +236,17 @@ impl RetrievalService {
 
         // ── Confidence calculation ─────────────────────────────────────────────
         let dict = self.entity_dictionary.read().await;
-        let (confidence_report, confidence_breakdown) = self.calculate_confidence_full(
+        let top_normalized_rerank = {
+            let sigmoid = |x: f32| 1.0_f32 / (1.0 + (-x).exp());
+            reranked_chunks.first().map(|c| sigmoid(c.score)).unwrap_or(0.0)
+        };
+        let (mut confidence_report, confidence_breakdown) = self.calculate_confidence_full(
             query,
             &reranked_chunks,
             &retrieval.strategy_used,
             &retrieval.analysis.complexity,
             &dict,
+            &retrieval.analysis.metadata_filters,
         );
 
         tracing::info!(
@@ -289,7 +294,7 @@ impl RetrievalService {
                 confidence_report.reasons.iter().map(|r| format!("- {}", r)).collect::<Vec<_>>().join("\n")
             );
             (fallback_answer, Vec::new(), 1.0_f32)
-        } else if !debug_mode && confidence_report.status == "LOW_CONFIDENCE_RETRIEVAL" {
+        } else if !debug_mode && confidence_report.status == "LOW_CONFIDENCE_RETRIEVAL" && top_normalized_rerank <= 0.90 {
             let sources = doc_aggregations.iter()
                 .map(|d| format!("- {} ({})", d.document_title, d.source))
                 .collect::<Vec<_>>()
@@ -315,9 +320,47 @@ impl RetrievalService {
             fallback_answer.push_str("\nWhich would you like?");
             (fallback_answer, Vec::new(), 1.0_f32)
         } else {
-            // PARTIAL_RETRIEVAL or OK
-            let mut top_chunks = reranked_chunks.clone();
-            top_chunks.truncate(3);
+            let mut top_chunks = Vec::new();
+            if !reranked_chunks.is_empty() {
+                // 1. Select the top chunk
+                top_chunks.push(reranked_chunks[0].clone());
+                
+                // 2. Select 2nd chunk from a different document
+                let mut second_chunk = None;
+                for chunk in reranked_chunks.iter().skip(1) {
+                    if chunk.document_id != top_chunks[0].document_id {
+                        second_chunk = Some(chunk.clone());
+                        break;
+                    }
+                }
+                if let Some(chunk) = second_chunk {
+                    top_chunks.push(chunk);
+                }
+                
+                // 3. Select 3rd chunk from a different document than 1st and 2nd
+                let mut third_chunk = None;
+                for chunk in reranked_chunks.iter().skip(1) {
+                    if chunk.document_id != top_chunks[0].document_id 
+                        && (top_chunks.len() < 2 || chunk.document_id != top_chunks[1].document_id)
+                    {
+                        third_chunk = Some(chunk.clone());
+                        break;
+                    }
+                }
+                if let Some(chunk) = third_chunk {
+                    top_chunks.push(chunk);
+                }
+                
+                // 4. Fill to 3 if we have fewer than 3 chunks
+                for chunk in &reranked_chunks {
+                    if top_chunks.len() >= 3 {
+                        break;
+                    }
+                    if !top_chunks.iter().any(|x| x.chunk_id == chunk.chunk_id) {
+                        top_chunks.push(chunk.clone());
+                    }
+                }
+            }
 
             let built_context = self.context_builder.build(top_chunks.clone());
             let dict = self.entity_dictionary.read().await;
@@ -427,7 +470,7 @@ impl RetrievalService {
             let validated_cits_len = raw_cits.len();
 
             // Deduplicate and sort citations
-            let cits = deduplicate_and_sort_citations(raw_cits);
+            let mut cits = deduplicate_and_sort_citations(raw_cits);
 
             // Citation Success Gate
             let is_comparison_fallback = ans == "Insufficient evidence was found to compare these systems completely.";
@@ -447,6 +490,29 @@ impl RetrievalService {
             );
 
             let coverage = if total_sent == 0 { 1.0 } else { kept_sent as f32 / total_sent as f32 };
+
+            let is_high_rerank_case = (top_normalized_rerank > 0.95 && confidence_breakdown.title_match_bonus > 0)
+                || top_normalized_rerank > 0.90;
+
+            if is_high_rerank_case && confidence_report.status == "LOW_CONFIDENCE_RETRIEVAL" {
+                if coverage >= 0.8 {
+                    confidence_report.status = "OK".to_string();
+                    confidence_report.confidence = "high".to_string();
+                } else {
+                    confidence_report.status = "LOW_CONFIDENCE_RETRIEVAL".to_string();
+                    confidence_report.confidence = "low".to_string();
+                    let sources = doc_aggregations.iter()
+                        .map(|d| format!("- {} ({})", d.document_title, d.source))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ans = format!(
+                        "I found potentially relevant information but confidence is low.\n\nStatus: LOW_CONFIDENCE_RETRIEVAL\nConfidence: {}/100\n\nRetrieved Sources:\n{}\n\nPlease refine your query to be more specific or add more context.",
+                        confidence_report.confidence_score,
+                        sources
+                    );
+                    cits = Vec::new();
+                }
+            }
 
             // Prepend warning if PARTIAL_RETRIEVAL
             if confidence_report.status == "PARTIAL_RETRIEVAL" && ans != "I found relevant information but could not verify supporting sources." && !is_comparison_fallback {
@@ -595,6 +661,7 @@ impl RetrievalService {
         strategy: &RetrievalStrategy,
         complexity: &crate::domain::QueryComplexity,
         entity_dict: &EntityDictionary,
+        filters: &MetadataFilters,
     ) -> (crate::domain::ConfidenceReport, ConfidenceBreakdown) {
         let mut reasons = Vec::new();
 
@@ -726,7 +793,9 @@ impl RetrievalService {
             "show", "explain", "describe", "summarize", "check", "find", "get",
             "tell", "which", "whose", "where", "whom", "stores", "interact",
             "interacts", "interaction", "interactions", "management", "manager",
-            "managers", "connect", "connects", "relate", "relates", "versus", "vs"
+            "managers", "connect", "connects", "relate", "relates", "versus", "vs",
+            "step", "steps", "procedures", "procedure", "report", "reports",
+            "ticket", "tickets", "troubleshooting"
         ].iter().cloned().collect();
 
         let query_keywords: Vec<String> = query.to_lowercase()
@@ -738,6 +807,20 @@ impl RetrievalService {
             .filter(|w| w.len() >= 3 && !stop_words_core.contains(w.as_str()) && !topic_words_core.contains(w.as_str()))
             .collect();
 
+        let mut skip_words = HashSet::new();
+        if let Some(authors) = &filters.author {
+            for author in authors {
+                for word in author.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+                    if !word.is_empty() {
+                        skip_words.insert(word.to_string());
+                    }
+                }
+            }
+            for w in &["written", "authored", "created", "made", "by"] {
+                skip_words.insert(w.to_string());
+            }
+        }
+
         let mut missing_core_keyword = false;
         let mut missing_kws = Vec::new();
         let chunks_text = chunks.iter().take(3)
@@ -746,6 +829,10 @@ impl RetrievalService {
             .join(" ");
 
         for kw in &query_keywords {
+            let kw_lower = kw.to_lowercase();
+            if skip_words.contains(&kw_lower) {
+                continue;
+            }
             if !chunks_text.contains(kw) {
                 missing_core_keyword = true;
                 missing_kws.push(kw.clone());
@@ -915,7 +1002,7 @@ impl RetrievalService {
         complexity: &crate::domain::QueryComplexity,
         entity_dict: &EntityDictionary,
     ) -> crate::domain::ConfidenceReport {
-        self.calculate_confidence_full(query, chunks, strategy, complexity, entity_dict).0
+        self.calculate_confidence_full(query, chunks, strategy, complexity, entity_dict, &MetadataFilters::default()).0
     }
 
     /// Broad-Topic Synthesis path — used when `detect_broad_topic` fires.
@@ -1246,20 +1333,49 @@ impl RetrievalService {
         depth: usize,
     ) -> Result<Vec<RetrievedChunk>> {
         let search_query = self.expand_query(query).await;
-        match strategy {
+        let mut results = match strategy {
             RetrievalStrategy::Dense => {
                 self.retrieve_dense(database, &search_query, analysis.metadata_filters.as_ref(), 20)
-                    .await
+                    .await?
             }
             RetrievalStrategy::Sparse => {
                 self.retrieve_sparse(database, &search_query, analysis.metadata_filters.as_ref(), 20)
-                    .await
+                    .await?
             }
-            RetrievalStrategy::Hybrid => self.retrieve_hybrid(database, &search_query, analysis, 30).await,
-            RetrievalStrategy::Faceted => self.retrieve_faceted(database, &search_query, analysis).await,
-            RetrievalStrategy::Contextual => self.retrieve_contextual(database, &search_query, analysis).await,
-            RetrievalStrategy::Recursive => self.retrieve_recursive(database, query, analysis, depth).await,
+            RetrievalStrategy::Hybrid => self.retrieve_hybrid(database, &search_query, analysis, 30).await?,
+            RetrievalStrategy::Faceted => self.retrieve_faceted(database, &search_query, analysis).await?,
+            RetrievalStrategy::Contextual => self.retrieve_contextual(database, &search_query, analysis).await?,
+            RetrievalStrategy::Recursive => self.retrieve_recursive(database, query, analysis, depth).await?,
+        };
+
+        let count_before = results.len();
+
+        // 1. Hard-filter by author
+        if let Some(ref authors) = analysis.metadata_filters.author {
+            filter_by_author(&mut results, authors);
         }
+        let count_after_author = results.len();
+
+        // 2. Hard-filter by date_range
+        let mut date_filters = MetadataFilters::default();
+        date_filters.date_range = analysis.metadata_filters.date_range.clone();
+        results.retain(|chunk| matches_filters(chunk, &date_filters));
+        let count_after_date = results.len();
+
+        // 3. Apply soft boosting for other metadata/facets and titles
+        apply_metadata_boosts(&mut results, &analysis.metadata_filters, query);
+        sort_descending(&mut results);
+        let count_after_boosting = results.len();
+
+        // Print telemetry log
+        println!("[FACET_FILTER]");
+        println!("before={} chunks", count_before);
+        println!("after_author_filter={}", count_after_author);
+        println!("after_date_filter={}", count_after_date);
+        println!("after_boosting={}", count_after_boosting);
+        println!();
+
+        Ok(results)
     }
 
     async fn retrieve_dense(
@@ -1378,7 +1494,12 @@ impl RetrievalService {
         analysis: &QueryAnalysis,
     ) -> Result<Vec<RetrievedChunk>> {
         let mut results = self.retrieve_hybrid(database, query, analysis, 30).await?;
-        results.retain(|chunk| matches_filters(chunk, &analysis.metadata_filters));
+        if let Some(ref authors) = analysis.metadata_filters.author {
+            filter_by_author(&mut results, authors);
+        }
+        let mut rest_filters = analysis.metadata_filters.clone();
+        rest_filters.author = None;
+        results.retain(|chunk| matches_filters(chunk, &rest_filters));
         Ok(results)
     }
 
@@ -1427,6 +1548,7 @@ impl RetrievalService {
             .take(5)
             .cloned()
             .collect();
+        let query_entities: Vec<String> = accepted_entities.iter().map(|e| e.group_name.clone()).collect();
 
         let mut detected_list = Vec::new();
         let mut accepted_list = Vec::new();
@@ -1744,7 +1866,7 @@ impl RetrievalService {
         for doc_id in hop2_doc_ids.into_iter().take(5) {
             let chunks_in_doc = database.document_repository().get_chunks_by_document(&doc_id)?;
             let chunk_ids: Vec<String> = chunks_in_doc.into_iter().map(|c| c.id).collect();
-            let mut hydrated_hop2 = hydrate_chunk_ids(database, &chunk_ids)?;
+            let hydrated_hop2 = hydrate_chunk_ids(database, &chunk_ids)?;
 
             let parent = hop1_chunks.iter().find(|c| {
                 graph_guard.neighbors(&c.document_id).contains(&doc_id)
@@ -1754,24 +1876,33 @@ impl RetrievalService {
                 None => (None, "Connected Document".to_string()),
             };
 
-            for chunk in &mut hydrated_hop2 {
-                let mut meta = chunk.metadata.as_object().cloned().unwrap_or_default();
+            for chunk in hydrated_hop2 {
+                if let Some(p) = parent {
+                    if !validate_bridge(&chunk, p, query, &query_entities, &dict) {
+                        tracing::info!(
+                            "[RECURSIVE] Rejecting noisy Hop-2 chunk: doc=\"{}\" parent=\"{}\"",
+                            chunk.document_title, p.document_title
+                        );
+                        continue;
+                    }
+                }
+
+                let mut chunk_mut = chunk;
+                let mut meta = chunk_mut.metadata.as_object().cloned().unwrap_or_default();
                 meta.insert("lineage".to_string(), json!({
                     "hop_number": 2,
-                    "parent_chunk": parent_chunk_id,
+                    "parent_chunk": parent_chunk_id.clone(),
                     "retrieval_reason": format!("Cross-reference: {}", parent_doc_title)
                 }));
-                chunk.metadata = Value::Object(meta);
+                chunk_mut.metadata = Value::Object(meta);
+                hop2_chunks.push(chunk_mut);
             }
-            hop2_chunks.extend(hydrated_hop2);
         }
 
         let mut accumulated = hop1_chunks;
         accumulated.extend(hop2_chunks);
         deduplicate_chunks(&mut accumulated);
 
-        let query_entities: Vec<String> = accepted_entities.iter().map(|e| e.group_name.clone()).collect();
-        
         let mut candidate_chunks = accumulated;
         if query_entities.len() >= 2 {
             let initial_count = candidate_chunks.len();
@@ -1829,6 +1960,20 @@ impl RetrievalService {
                 }
 
                 let coverage = cross_document_entity_coverage(chunk, &query_entities, &dict);
+
+                // Restrict bridge boosts to documents with query entity coverage > 0.0
+                let is_hop2 = chunk.metadata.get("lineage")
+                    .and_then(|l| l.get("hop_number"))
+                    .and_then(|h| h.as_i64())
+                    .map_or(false, |h| h == 2);
+                if is_hop2 && coverage <= 0.0 {
+                    tracing::info!(
+                        "[BOOST_AUDIT] doc=\"{}\" pre={:.4} SKIPPED (Hop-2 document with entity coverage = 0.0)",
+                        chunk.document_title, pre_boost
+                    );
+                    continue;
+                }
+
                 let mut total_boost = 0.0_f32;
 
                 if coverage >= 0.99 {
@@ -3057,6 +3202,66 @@ fn count_occurrences(text: &str, sub: &str) -> usize {
     count
 }
 
+fn validate_bridge(
+    chunk: &RetrievedChunk,
+    parent: &RetrievedChunk,
+    query: &str,
+    query_entities: &[String],
+    entity_dict: &EntityDictionary,
+) -> bool {
+    let chunk_text = format!("{} {}", chunk.content.to_lowercase(), chunk.document_title.to_lowercase());
+    
+    // 1. Entity overlap check:
+    let has_entity = query_entities.iter().any(|entity| {
+        if let Some(group) = entity_dict.groups.iter().find(|g| g.name.eq_ignore_ascii_case(entity)) {
+            count_entity_mentions(&chunk_text, group) > 0
+        } else {
+            chunk_text.contains(&entity.to_lowercase())
+        }
+    });
+
+    // 2. Query keyword matches:
+    let stop_words: HashSet<&str> = [
+        "what", "is", "the", "does", "how", "to", "explain", "describe", "about",
+        "system", "use", "connect", "with", "and", "or", "a", "an", "of",
+        "which", "where", "that", "this", "for", "from", "are", "was", "were",
+    ].iter().cloned().collect();
+
+    let query_words: Vec<String> = query.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() > 3 && !stop_words.contains(s.as_str()))
+        .collect();
+
+    let mut keyword_matches = 0;
+    for w in &query_words {
+        if chunk_text.contains(w) {
+            keyword_matches += 1;
+        }
+    }
+
+    // 3. Category prefix match:
+    let parent_category = parent.category.as_ref().map(|c| c.to_lowercase());
+    let chunk_category = chunk.category.as_ref().map(|c| c.to_lowercase());
+    
+    let categories_match = match (&parent_category, &chunk_category) {
+        (Some(p_cat), Some(c_cat)) => {
+            p_cat.starts_with(c_cat) || c_cat.starts_with(p_cat)
+        }
+        _ => true,
+    };
+
+    if !categories_match && !has_entity {
+        return false;
+    }
+
+    if keyword_matches == 0 && !has_entity {
+        return false;
+    }
+
+    true
+}
+
 fn cross_document_entity_coverage(
     chunk: &RetrievedChunk,
     query_entities: &[String],
@@ -3184,35 +3389,29 @@ fn mentions_both_targets(chunk: &RetrievedChunk, target_x: &str, target_y: &str,
 fn build_qdrant_filter(filters: &MetadataFilters) -> Option<QdrantSearchFilter> {
     let mut must = Vec::new();
 
-    if let Some(sources) = &filters.source {
-        must.push(json!({
-            "key": "source",
-            "match": { "any": sources }
-        }));
-    }
-
     if let Some(authors) = &filters.author {
-        let lowered: Vec<String> = authors.iter().map(|s| s.to_lowercase()).collect();
-        must.push(json!({
-            "key": "author",
-            "match": { "any": lowered }
-        }));
-    }
+        if !authors.is_empty() {
+            let mut author_conditions = Vec::new();
+            for a in authors {
+                let lower_a = a.to_lowercase();
+                
+                // Exact / case-insensitive value match (stored payloads are lowercase)
+                author_conditions.push(json!({
+                    "key": "author",
+                    "match": { "value": lower_a }
+                }));
 
-    if let Some(tags) = &filters.tags {
-        let lowered: Vec<String> = tags.iter().map(|s| s.to_lowercase()).collect();
-        must.push(json!({
-            "key": "tags",
-            "match": { "any": lowered }
-        }));
-    }
-
-    if let Some(categories) = &filters.category {
-        let lowered: Vec<String> = categories.iter().map(|s| s.to_lowercase()).collect();
-        must.push(json!({
-            "key": "category",
-            "match": { "any": lowered }
-        }));
+                // Regex fallback
+                let regex_pattern = format!(r"\b{}\b", regex::escape(&lower_a));
+                author_conditions.push(json!({
+                    "key": "author",
+                    "match": { "regex": regex_pattern }
+                }));
+            }
+            must.push(json!({
+                "should": author_conditions
+            }));
+        }
     }
 
     if let Some(date_range) = &filters.date_range {
@@ -3242,48 +3441,93 @@ fn build_qdrant_filter(filters: &MetadataFilters) -> Option<QdrantSearchFilter> 
     }
 }
 
-fn matches_filters(chunk: &RetrievedChunk, filters: &MetadataFilters) -> bool {
-    if let Some(sources) = &filters.source {
-        if !sources
-            .iter()
-            .any(|source| source.eq_ignore_ascii_case(&chunk.source))
-        {
-            return false;
-        }
+fn filter_by_author(results: &mut Vec<RetrievedChunk>, authors: &[String]) {
+    if authors.is_empty() {
+        return;
     }
 
+    // 1. Try exact match first
+    let mut exact_matches = Vec::new();
+    for chunk in results.iter() {
+        if let Some(ref doc_author) = chunk.author {
+            let doc_author_trimmed = doc_author.trim();
+            if authors.iter().any(|candidate| doc_author_trimmed == candidate.trim()) {
+                exact_matches.push(chunk.clone());
+            }
+        }
+    }
+    if !exact_matches.is_empty() {
+        *results = exact_matches;
+        return;
+    }
+
+    // 2. Try case-insensitive match
+    let mut case_insensitive_matches = Vec::new();
+    for chunk in results.iter() {
+        if let Some(ref doc_author) = chunk.author {
+            let doc_author_lower = doc_author.trim().to_lowercase();
+            if authors.iter().any(|candidate| doc_author_lower == candidate.trim().to_lowercase()) {
+                case_insensitive_matches.push(chunk.clone());
+            }
+        }
+    }
+    if !case_insensitive_matches.is_empty() {
+        *results = case_insensitive_matches;
+        return;
+    }
+
+    // 3. Try regex fallback
+    let mut regex_matches = Vec::new();
+    for chunk in results.iter() {
+        if let Some(ref doc_author) = chunk.author {
+            let doc_author_lower = doc_author.trim().to_lowercase();
+            let matched = authors.iter().any(|candidate| {
+                let candidate_lower = candidate.trim().to_lowercase();
+                let pattern = format!(r"\b{}\b", regex::escape(&candidate_lower));
+                if let Ok(re) = regex::Regex::new(&pattern) {
+                    re.is_match(&doc_author_lower)
+                } else {
+                    false
+                }
+            });
+            if matched {
+                regex_matches.push(chunk.clone());
+            }
+        }
+    }
+    *results = regex_matches;
+}
+
+fn matches_filters(chunk: &RetrievedChunk, filters: &MetadataFilters) -> bool {
     if let Some(authors) = &filters.author {
         let Some(author) = &chunk.author else {
             return false;
         };
-        if !authors
-            .iter()
-            .any(|candidate| author.to_lowercase().contains(&candidate.to_lowercase()))
-        {
-            return false;
-        }
-    }
+        let doc_author = author.trim();
+        let doc_author_lower = doc_author.to_lowercase();
 
-    if let Some(tags) = &filters.tags {
-        if !tags.iter().any(|required| {
-            chunk
-                .tags
-                .iter()
-                .any(|tag| tag.to_lowercase().contains(&required.to_lowercase()))
-        }) {
-            return false;
-        }
-    }
+        let matched = authors.iter().any(|candidate| {
+            let candidate = candidate.trim();
+            let candidate_lower = candidate.to_lowercase();
 
-    if let Some(categories) = &filters.category {
-        let Some(category) = &chunk.category else {
-            return false;
-        };
-        if !categories.iter().any(|value| {
-            category
-                .to_lowercase()
-                .contains(&value.to_lowercase())
-        }) {
+            // 1. Exact match
+            if doc_author == candidate {
+                return true;
+            }
+            // 2. Case-insensitive match
+            if doc_author_lower == candidate_lower {
+                return true;
+            }
+            // 3. Regex fallback
+            let pattern = format!(r"\b{}\b", regex::escape(&candidate_lower));
+            if let Ok(re) = regex::Regex::new(&pattern) {
+                if re.is_match(&doc_author_lower) {
+                    return true;
+                }
+            }
+            false
+        });
+        if !matched {
             return false;
         }
     }
@@ -3319,6 +3563,131 @@ fn is_upcoming_event(metadata: &Value) -> bool {
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
+}
+
+fn apply_metadata_boosts(chunks: &mut [RetrievedChunk], filters: &MetadataFilters, query: &str) {
+    for chunk in chunks {
+        let mut boost = 0.0_f32;
+
+        // 1. document_type boost: if matches, boost by +8.0
+        if let Some(doc_types) = &filters.document_type {
+            let doc_type_in_meta = chunk.metadata.get("document_type").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
+            let title_lower = chunk.document_title.to_lowercase();
+            let id_lower = chunk.document_id.to_lowercase();
+
+            for dt in doc_types {
+                let dt_lower = dt.to_lowercase();
+                let dt_clean = dt_lower.replace('_', " ");
+                let matches_dt = doc_type_in_meta.as_ref().map_or(false, |val| val.contains(&dt_lower))
+                    || title_lower.contains(&dt_lower) || title_lower.contains(&dt_clean)
+                    || id_lower.contains(&dt_lower) || id_lower.contains(&dt_clean);
+                if matches_dt {
+                    boost += 8.0;
+                }
+            }
+        }
+
+        // 2. topic boost: if matches, boost by +5.0
+        if let Some(topics) = &filters.topic {
+            let topic_in_meta = chunk.metadata.get("topic").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
+            let content_lower = chunk.content.to_lowercase();
+            let title_lower = chunk.document_title.to_lowercase();
+            let id_lower = chunk.document_id.to_lowercase();
+
+            for top in topics {
+                let top_lower = top.to_lowercase();
+                let top_clean = top_lower.replace('_', " ");
+                let matches_top = topic_in_meta.as_ref().map_or(false, |val| val.contains(&top_lower))
+                    || content_lower.contains(&top_lower) || content_lower.contains(&top_clean)
+                    || title_lower.contains(&top_lower) || title_lower.contains(&top_clean)
+                    || id_lower.contains(&top_lower) || id_lower.contains(&top_clean);
+                if matches_top {
+                    boost += 5.0;
+                }
+            }
+        }
+
+        // 3. source boost: if matches, boost by +3.0
+        if let Some(sources) = &filters.source {
+            if sources.iter().any(|s| s.eq_ignore_ascii_case(&chunk.source)) {
+                boost += 3.0;
+            }
+        }
+
+        // 4. category boost: if matches, boost by +3.0
+        if let Some(categories) = &filters.category {
+            if let Some(cat) = &chunk.category {
+                if categories.iter().any(|c| cat.to_lowercase().contains(&c.to_lowercase())) {
+                    boost += 3.0;
+                }
+            }
+        }
+
+        // 5. tags boost: if matches, boost by +3.0
+        if let Some(tags) = &filters.tags {
+            let matches_tag = tags.iter().any(|req| {
+                chunk.tags.iter().any(|tag| tag.to_lowercase().contains(&req.to_lowercase()))
+            });
+            if matches_tag {
+                boost += 3.0;
+            }
+        }
+
+        // 6. Title and slug keyword matching boost (Issue 5)
+        let title_lower = chunk.document_title.to_lowercase();
+        let slug_lower = chunk.document_id.to_lowercase();
+
+        let title_stop_words: HashSet<&str> = [
+            "what", "is", "the", "does", "how", "to", "explain", "describe", "about",
+            "system", "use", "connect", "with", "and", "or", "a", "an", "of",
+            "which", "where", "that", "this", "for", "from", "are", "was", "were",
+            "tell", "give", "show", "find", "get", "written", "by", "authored", "created", "made",
+        ].iter().cloned().collect();
+
+        // Count matching words
+        let mut title_word_matches = 0;
+        let query_words: Vec<String> = query.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.len() > 3 && !title_stop_words.contains(s.as_str()))
+            .collect();
+
+        for w in &query_words {
+            if title_lower.contains(w) || slug_lower.contains(w) {
+                title_word_matches += 1;
+            }
+        }
+
+        if title_word_matches > 0 {
+            boost += (title_word_matches as f32 * 4.0_f32).min(12.0_f32);
+        }
+
+        // Exact multi-word phrase overlaps
+        if query_words.len() >= 2 {
+            for window in query_words.windows(2) {
+                let phrase = window.join(" ");
+                let phrase_und = window.join("_");
+                if title_lower.contains(&phrase) || slug_lower.contains(&phrase) 
+                    || title_lower.contains(&phrase_und) || slug_lower.contains(&phrase_und) 
+                {
+                    boost += 6.0;
+                }
+            }
+        }
+        if query_words.len() >= 3 {
+            for window in query_words.windows(3) {
+                let phrase = window.join(" ");
+                let phrase_und = window.join("_");
+                if title_lower.contains(&phrase) || slug_lower.contains(&phrase) 
+                    || title_lower.contains(&phrase_und) || slug_lower.contains(&phrase_und) 
+                {
+                    boost += 8.0;
+                }
+            }
+        }
+
+        chunk.score += boost;
+    }
 }
 
 fn is_ambiguous_retrieval(

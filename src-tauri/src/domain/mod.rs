@@ -157,6 +157,104 @@ pub struct MetadataFilters {
     pub tags: Option<Vec<String>>,
     pub category: Option<Vec<String>>,
     pub date_range: Option<MetadataDateRange>,
+    pub document_type: Option<Vec<String>>,
+    pub topic: Option<Vec<String>>,
+}
+
+pub fn normalize_document_type(dt: &str) -> String {
+    let lower = dt.to_lowercase();
+    if lower.contains("outage report") || lower.contains("outage_report") || lower.contains("outage-report") || lower.contains("outages") || lower.contains("service outage") {
+        "outage_report".to_string()
+    } else if lower.contains("troubleshooting") || lower.contains("troubleshoot") || lower.contains("guide") {
+        "troubleshooting".to_string()
+    } else if lower.contains("faq") || lower.contains("faqs") {
+        "faq".to_string()
+    } else if lower.contains("onboarding") || lower.contains("onboard") {
+        "onboarding".to_string()
+    } else if lower.contains("incident") || lower.contains("incidents") {
+        "incident".to_string()
+    } else if lower.contains("policy") || lower.contains("policies") || lower.contains("reimbursement") {
+        "policy".to_string()
+    } else if lower.contains("roadmap") || lower.contains("roadmaps") {
+        "roadmap".to_string()
+    } else if lower.contains("billing") || lower.contains("invoice") || lower.contains("invoices") {
+        "billing".to_string()
+    } else if lower.contains("authentication") || lower.contains("auth") || lower.contains("login") || lower.contains("oauth") || lower.contains("token") {
+        "authentication".to_string()
+    } else {
+        "other".to_string()
+    }
+}
+
+pub fn normalize_topic(t: &str) -> String {
+    let lower = t.to_lowercase();
+    if lower.contains("high memory usage") || lower.contains("memory") {
+        "high memory usage".to_string()
+    } else if lower.contains("mfa setup") || lower.contains("mfa") {
+        "mfa".to_string()
+    } else if lower.contains("login error") || lower.contains("login") {
+        "login".to_string()
+    } else if lower.contains("billing") || lower.contains("invoice") || lower.contains("payment") {
+        "billing".to_string()
+    } else if lower.contains("ui lag") || lower.contains("lag") || lower.contains("performance") {
+        "ui lag".to_string()
+    } else if lower.contains("data loss") || lower.contains("loss") {
+        "data loss".to_string()
+    } else if lower.contains("password reset") || lower.contains("password") {
+        "password reset".to_string()
+    } else if lower.contains("connection") || lower.contains("network") {
+        "connection".to_string()
+    } else if lower.contains("db corruption") || lower.contains("database") {
+        "db corruption".to_string()
+    } else if lower.contains("agent offline") || lower.contains("offline") {
+        "agent offline".to_string()
+    } else if lower.contains("sync failure") || lower.contains("sync") {
+        "sync failure".to_string()
+    } else if lower.contains("new hire checklist") || lower.contains("onboarding") {
+        "new hire checklist".to_string()
+    } else if lower.contains("system permissions") || lower.contains("permission") || lower.contains("permissions") {
+        "system permissions".to_string()
+    } else {
+        // Fallback: extract keywords from title
+        let stop_words: std::collections::HashSet<&str> = ["and", "the", "for", "with", "about", "guide", "flow", "overview"].iter().cloned().collect();
+        let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 3 && !stop_words.contains(w))
+            .collect();
+        if !words.is_empty() {
+            words.join(" ")
+        } else {
+            lower
+        }
+    }
+}
+
+pub fn extract_document_type(title: &str, doc_id: &str) -> String {
+    let lower_title = title.to_lowercase();
+    let lower_id = doc_id.to_lowercase();
+    
+    // Check id first as it is more specific
+    let res = normalize_document_type(&lower_id);
+    if res != "other" {
+        return res;
+    }
+    normalize_document_type(&lower_title)
+}
+
+pub fn extract_topic(title: &str, _doc_id: &str) -> String {
+    normalize_topic(title)
+}
+
+pub fn enrich_metadata(title: &str, doc_id: &str, metadata: &mut serde_json::Value) {
+    if let Some(obj) = metadata.as_object_mut() {
+        if !obj.contains_key("document_type") {
+            let doc_type = extract_document_type(title, doc_id);
+            obj.insert("document_type".to_string(), serde_json::Value::String(doc_type));
+        }
+        if !obj.contains_key("topic") {
+            let topic = extract_topic(title, doc_id);
+            obj.insert("topic".to_string(), serde_json::Value::String(topic));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

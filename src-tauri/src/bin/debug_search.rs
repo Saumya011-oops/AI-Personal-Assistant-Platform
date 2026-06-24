@@ -37,17 +37,11 @@ async fn main() -> Result<()> {
 
     retrieval_service.initialize(&database).await?;
 
-    let query = "Difference between OAuth and token management";
-    let res = retrieval_service.ask_assistant(&database, query).await?;
-    let report = res.confidence.as_ref().unwrap();
-    println!("Confidence Status: {}", report.status);
-    println!("Confidence Score: {}", report.confidence_score);
-    println!("Confidence Reasons: {:?}", report.reasons);
-    println!("Answer: {}", res.answer);
-    println!("Citations count: {}", res.citations.len());
-    println!("\n=== Citations returned ===");
-    for (i, cit) in res.citations.iter().enumerate() {
-        println!("  {}. Title='{}', Chunk ID={}", i + 1, cit.source_document, cit.chunk_id);
+    let query = "How does authentication interact with Qdrant access control?";
+    println!("=== Retrieval for '{}' ===", query);
+    let res = retrieval_service.retrieve_documents(&database, query).await?;
+    for (i, c) in res.results.iter().enumerate() {
+        println!("  {}. Title='{}', score={}, source={}", i + 1, c.document_title, c.score, c.source);
     }
     
     Ok(())
