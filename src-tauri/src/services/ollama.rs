@@ -29,6 +29,10 @@ impl OllamaService {
         }
     }
 
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// Generates 768-dimensional embeddings for a batch of chunk texts.
     /// Ollama expects standard POST to /api/embed.
     pub async fn generate_embeddings(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {

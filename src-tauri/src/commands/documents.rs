@@ -96,6 +96,7 @@ pub async fn retrieve_documents(
 pub async fn ask_assistant(
     state: State<'_, AppState>,
     query: String,
+    conversation_id: Option<String>,
 ) -> Result<CommandEnvelope<AssistantResponse>, String> {
     if query.trim().is_empty() {
         return Ok(CommandEnvelope::error(
@@ -104,12 +105,25 @@ pub async fn ask_assistant(
         ));
     }
 
+    let cid = match conversation_id {
+        Some(ref id) if !id.trim().is_empty() => id.clone(),
+        _ => {
+            match state.memory_service.create_chat("New Chat") {
+                Ok(id) => id,
+                Err(e) => return Ok(CommandEnvelope::error("CREATE_CHAT_FAILED", e.to_string())),
+            }
+        }
+    };
+
     match state
         .retrieval_service
-        .ask_assistant(&state.database, &query)
+        .ask_assistant(&state.database, &state.memory_service, &query, &cid, &state.intent_router)
         .await
     {
-        Ok(response) => Ok(CommandEnvelope::success(response)),
+        Ok(mut response) => {
+            response.conversation_id = Some(cid);
+            Ok(CommandEnvelope::success(response))
+        }
         Err(error) => Ok(CommandEnvelope::error("ASSISTANT_QUERY_FAILED", error.to_string())),
     }
 }

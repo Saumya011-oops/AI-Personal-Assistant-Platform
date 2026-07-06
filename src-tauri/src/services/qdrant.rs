@@ -222,6 +222,41 @@ impl QdrantService {
             ))
         }
     }
+
+    /// Deletes specific points from the Qdrant collection.
+    pub async fn delete_points(&self, ids: Vec<String>) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let url = format!(
+            "{}/collections/{}/points/delete",
+            self.base_url.trim_end_matches('/'),
+            self.collection_name
+        );
+
+        let payload = json!({
+            "points": ids
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Failed to delete points from Qdrant collection '{}': {}",
+                self.collection_name,
+                error_text
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

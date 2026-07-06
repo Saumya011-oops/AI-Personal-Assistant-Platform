@@ -10,7 +10,12 @@ use assistant_core::services::reranker::RerankerService;
 use assistant_core::services::context_builder::ContextBuilder;
 use assistant_core::services::retrieval::RetrievalService;
 
-async fn run_and_verify(retrieval_service: &RetrievalService, database: &Database, query: &str) -> Result<()> {
+async fn run_and_verify(
+    retrieval_service: &RetrievalService,
+    memory_service: &assistant_core::services::memory::MemoryService,
+    database: &Database,
+    query: &str,
+) -> Result<()> {
     println!("\n========================================================================");
     println!("RUNNING QUERY: \"{}\"", query);
     
@@ -28,7 +33,8 @@ async fn run_and_verify(retrieval_service: &RetrievalService, database: &Databas
     }
 
     let start_time = std::time::Instant::now();
-    let response = retrieval_service.ask_assistant(database, query).await?;
+    let intent_router = assistant_core::services::intent_router::IntentRouter::new();
+    let response = retrieval_service.ask_assistant(database, memory_service, query, "verify-chat", &intent_router).await?;
     let duration = start_time.elapsed();
     
     let report = response.confidence.as_ref().unwrap();
@@ -100,17 +106,38 @@ async fn main() -> Result<()> {
     let context_builder = ContextBuilder::new();
 
     let retrieval_service = RetrievalService::new(
-        ollama_service,
+        ollama_service.clone(),
         qdrant_service,
         sparse_service,
-        groq_service,
+        groq_service.clone(),
         query_analyzer_service,
         reranker_service,
         context_builder,
     );
 
+    let memory_service = assistant_core::services::memory::MemoryService::new(
+        database.clone(),
+        ollama_service,
+        groq_service,
+        &config.qdrant_url,
+    );
+
+    println!("Initializing Memory Service...");
+    memory_service.initialize().await.context("Failed to initialize memory service")?;
+
     println!("Initializing Retrieval Service...");
     retrieval_service.initialize(&database).await.context("Failed to initialize retrieval service")?;
+    
+    // Ensure the verification chat exists in SQLite so that foreign keys in messages/memories succeed.
+    {
+        let conn_arc = database.get_connection();
+        let conn = conn_arc.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at) VALUES (?1, ?2, datetime('now'), datetime('now'))",
+            rusqlite::params!["verify-chat", "Verification Chat"],
+        );
+    }
+
     println!("System ready. Starting verification queries.");
 
     let queries = vec![
@@ -127,7 +154,7 @@ async fn main() -> Result<()> {
             println!("Sleeping 15 seconds to avoid Groq TPM rate limits...");
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
-        run_and_verify(&retrieval_service, &database, query).await?;
+        run_and_verify(&retrieval_service, &memory_service, &database, query).await?;
     }
 
     println!("\n========================================================================");

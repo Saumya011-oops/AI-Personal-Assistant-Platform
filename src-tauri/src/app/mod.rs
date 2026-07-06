@@ -57,17 +57,24 @@ pub fn run() {
                 sparse_service.clone(),
             ));
             let retrieval_service = Arc::new(crate::services::retrieval::RetrievalService::new(
-                ollama_service,
+                ollama_service.clone(),
                 qdrant_service,
                 sparse_service,
-                groq_service,
+                groq_service.clone(),
                 query_analyzer_service,
                 reranker_service,
                 context_builder,
             ));
+            let memory_service = Arc::new(crate::services::memory::MemoryService::new(
+                database.clone(),
+                ollama_service.clone(),
+                groq_service,
+                &config.qdrant_url,
+            ));
 
             let pipeline_clone = pipeline_service.clone();
             let retrieval_clone = retrieval_service.clone();
+            let memory_clone = memory_service.clone();
             let database_clone = database.clone();
             tauri::async_runtime::spawn(async move {
                 // Pipeline initialization: Qdrant failure is non-fatal.
@@ -101,6 +108,9 @@ pub fn run() {
                     }
                 }
 
+                // Initialize memories collection
+                let _ = memory_clone.initialize().await;
+
                 // Run Qdrant health check to produce a clear startup diagnostic
                 retrieval_clone.check_dense_retrieval_health().await;
             });
@@ -113,6 +123,8 @@ pub fn run() {
                 credential_service,
                 pipeline_service,
                 retrieval_service,
+                memory_service,
+                intent_router: crate::services::intent_router::IntentRouter::new(),
                 oauth_pending_state: Arc::new(Mutex::new(None)),
                 app_handle: handle,
             };
@@ -142,6 +154,20 @@ pub fn run() {
             commands::documents::clear_all_documents,
             commands::documents::get_rag_performance_report,
             commands::settings::logout_and_reset,
+            commands::memory::create_chat,
+            commands::memory::list_chats,
+            commands::memory::delete_chat,
+            commands::memory::rename_chat,
+            commands::memory::search_chats,
+            commands::memory::load_chat_messages,
+            commands::memory::get_conversation_summary,
+            commands::memory::list_memories,
+            commands::memory::delete_memory,
+            commands::memory::update_memory,
+            commands::memory::clear_all_memories,
+            commands::memory::export_memories,
+            commands::memory::import_memories,
+            commands::memory::reset_assistant_data,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");

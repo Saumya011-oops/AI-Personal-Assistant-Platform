@@ -50,6 +50,7 @@ export const searchDocumentsSemanticInputSchema = z.object({
 
 export const assistantQueryInputSchema = z.object({
   query: z.string(),
+  conversationId: z.string().nullable().optional(),
 });
 
 export const saveCredentialInputSchema = z.object({
@@ -123,6 +124,62 @@ export const tauriCommandSchemas = {
     output: z.unknown(),
   },
   logout_and_reset: {
+    input: emptyPayloadSchema,
+    output: z.unknown(),
+  },
+  create_chat: {
+    input: z.object({ title: z.string() }),
+    output: z.string(),
+  },
+  list_chats: {
+    input: emptyPayloadSchema,
+    output: z.array(z.any()),
+  },
+  delete_chat: {
+    input: z.object({ id: z.string() }),
+    output: z.unknown(),
+  },
+  rename_chat: {
+    input: z.object({ id: z.string(), title: z.string() }),
+    output: z.unknown(),
+  },
+  search_chats: {
+    input: z.object({ query: z.string() }),
+    output: z.array(z.any()),
+  },
+  load_chat_messages: {
+    input: z.object({ conversationId: z.string() }),
+    output: z.array(z.any()),
+  },
+  get_conversation_summary: {
+    input: z.object({ conversationId: z.string() }),
+    output: z.string().nullable(),
+  },
+  list_memories: {
+    input: emptyPayloadSchema,
+    output: z.array(z.any()),
+  },
+  delete_memory: {
+    input: z.object({ id: z.string() }),
+    output: z.unknown(),
+  },
+  update_memory: {
+    input: z.object({ id: z.string(), content: z.string(), importance: z.number() }),
+    output: z.unknown(),
+  },
+  clear_all_memories: {
+    input: emptyPayloadSchema,
+    output: z.unknown(),
+  },
+  export_memories: {
+    input: emptyPayloadSchema,
+    output: z.string(),
+  },
+  import_memories: {
+    input: z.object({ jsonStr: z.string() }),
+    output: z.unknown(),
+  },
+  reset_assistant_data: {
     input: emptyPayloadSchema,
     output: z.unknown(),
   },

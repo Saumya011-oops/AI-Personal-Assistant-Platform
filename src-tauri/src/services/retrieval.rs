@@ -116,7 +116,345 @@ impl RetrievalService {
         Ok(())
     }
 
-    pub async fn ask_assistant(&self, database: &Database, query: &str) -> Result<AssistantResponse> {
+    pub async fn ask_assistant(
+        &self,
+        database: &Database,
+        memory_service: &crate::services::memory::MemoryService,
+        query: &str,
+        conversation_id: &str,
+        intent_router: &crate::services::intent_router::IntentRouter,
+    ) -> Result<AssistantResponse> {
+        // ── Step 1: Load conversation context (always needed) ─────────────
+        let (convo_summary, recent_messages) =
+            memory_service.get_chat_history_for_prompt(conversation_id, 2000).await?;
+
+        // ── Step 2: Classify intent ───────────────────────────────────────
+        let intent = intent_router.classify(query);
+        tracing::info!("[INTENT_ROUTER] query={:?} → intent={}", query, intent);
+
+        // ── Step 3: Dispatch ──────────────────────────────────────────────
+        let mut response = match intent {
+            crate::services::intent_router::IntentClass::MemoryStore => {
+                self.handle_memory_store(
+                    memory_service,
+                    query,
+                    convo_summary.as_deref(),
+                    &recent_messages,
+                ).await?
+            }
+
+            crate::services::intent_router::IntentClass::MemoryRecall => {
+                let relevant_memories = memory_service.retrieve_memories_for_query(query, 8).await?;
+                self.handle_memory_recall(
+                    query,
+                    convo_summary.as_deref(),
+                    &relevant_memories,
+                    &recent_messages,
+                ).await?
+            }
+
+            crate::services::intent_router::IntentClass::NormalChat => {
+                self.handle_normal_chat(
+                    query,
+                    convo_summary.as_deref(),
+                    &recent_messages,
+                ).await?
+            }
+
+            // RAG_QUERY: full document pipeline, memories passed for prompt+grounding.
+            crate::services::intent_router::IntentClass::RagQuery => {
+                let relevant_memories = memory_service.retrieve_memories_for_query(query, 5).await?;
+                let memories_json = Self::memories_to_json(&relevant_memories);
+                let mut resp = self.ask_assistant_rag_core(
+                    database,
+                    query,
+                    convo_summary.as_deref(),
+                    &relevant_memories,
+                    &recent_messages,
+                ).await?;
+                resp.memories = Some(memories_json);
+                resp
+            }
+
+            // HYBRID_QUERY: fetch more memories so personal context is rich.
+            crate::services::intent_router::IntentClass::HybridQuery => {
+                let relevant_memories = memory_service.retrieve_memories_for_query(query, 8).await?;
+                let memories_json = Self::memories_to_json(&relevant_memories);
+                let mut resp = self.ask_assistant_rag_core(
+                    database,
+                    query,
+                    convo_summary.as_deref(),
+                    &relevant_memories,
+                    &recent_messages,
+                ).await?;
+                resp.memories = Some(memories_json);
+                resp
+            }
+        };
+
+        // ── Step 4: Persist user message ──────────────────────────────────
+        let user_token_est = (query.split_whitespace().count() as f64 * 1.3) as i64;
+        if let Err(e) = memory_service.save_message(
+            conversation_id,
+            "user",
+            query,
+            user_token_est,
+            None,
+            None,
+            None,
+        ) {
+            tracing::error!("Failed to save user message to SQLite: {}", e);
+        }
+
+        // ── Step 5: Persist assistant message ─────────────────────────────
+        let assistant_token_est = (response.answer.split_whitespace().count() as f64 * 1.3) as i64;
+        let retrieved_doc_ids: Vec<String> = response.citations.iter().map(|c| c.document_id.clone()).collect();
+        let retrieved_memory_ids: Vec<String> = response
+            .memories
+            .as_ref()
+            .map(|mems| {
+                mems.iter()
+                    .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let citations_json = serde_json::to_value(&response.citations).ok();
+
+        if let Err(e) = memory_service.save_message(
+            conversation_id,
+            "assistant",
+            &response.answer,
+            assistant_token_est,
+            Some(retrieved_doc_ids),
+            Some(retrieved_memory_ids),
+            citations_json,
+        ) {
+            tracing::error!("Failed to save assistant message to SQLite: {}", e);
+        }
+
+        // ── Step 6: Auto-title on first message ───────────────────────────
+        let messages = memory_service.list_messages(conversation_id)?;
+        if messages.len() <= 2 {
+            let db_clone = database.clone();
+            let groq_clone = self.groq_service.clone();
+            let cid = conversation_id.to_string();
+            let first_query = query.to_string();
+            tokio::spawn(async move {
+                let system_prompt = "You are a helpful AI assistant. Generate a short, concise, and catchy title (3-5 words) for a conversation based on the first user message. Do not include quotes, markdown formatting, or any extra conversational text. Return ONLY the title.";
+                let user_prompt = format!("User message: {}", first_query);
+                if let Ok(title) = groq_clone.chat_text(system_prompt, &user_prompt).await {
+                    let clean_title = title.trim().trim_matches('"').trim_matches('\'').to_string();
+                    let conn_arc = db_clone.get_connection();
+                    let conn = conn_arc.lock().unwrap();
+                    let _ = conn.execute(
+                        "UPDATE chats SET title = ?1 WHERE id = ?2",
+                        rusqlite::params![clean_title, cid],
+                    );
+                }
+            });
+        }
+
+        // ── Step 7: Queue background memory extraction ────────────────────
+        let _ = memory_service.queue_memory_extraction(conversation_id, query, &response.answer);
+
+        Ok(response)
+    }
+
+    // -----------------------------------------------------------------------
+    // Intent-specific handlers (private)
+    // -----------------------------------------------------------------------
+
+    /// MEMORY_STORE handler: acknowledge the personal fact naturally, no RAG.
+    async fn handle_memory_store(
+        &self,
+        memory_service: &crate::services::memory::MemoryService,
+        query: &str,
+        convo_summary: Option<&str>,
+        recent_messages: &[crate::services::memory::DbMessage],
+    ) -> Result<AssistantResponse> {
+        use crate::services::prompt_builder::{PromptBuilder, PromptContext};
+
+        let system_prompt = "You are a helpful, friendly AI assistant. \
+            The user has shared a personal fact or preference with you. \
+            Acknowledge it warmly and naturally in 1-2 sentences. \
+            Do NOT ask follow-up questions. \
+            Do NOT repeat the fact verbatim at length. \
+            Just confirm you have noted it.";
+
+        let builder = PromptBuilder::new();
+        let user_prompt = builder.build_user_prompt(&PromptContext {
+            convo_summary,
+            long_term_memories: &[],
+            episodic_memories: &[],
+            recent_messages,
+            rag_context_markdown: "",
+            query,
+        });
+
+        let answer = self.groq_service.chat_text(system_prompt, &user_prompt).await
+            .unwrap_or_else(|e| {
+                tracing::error!("MEMORY_STORE generation failed: {}", e);
+                "Got it, I'll remember that.".to_string()
+            });
+
+        // Eagerly queue extraction so it runs even before the caller's Step 7
+        let _ = memory_service.queue_memory_extraction("", query, &answer);
+
+        Ok(AssistantResponse {
+            answer,
+            citations: Vec::new(),
+            confidence: Some(crate::domain::ConfidenceReport {
+                confidence: "high".to_string(),
+                confidence_score: 100,
+                reasons: vec!["Memory store: no retrieval required.".to_string()],
+                status: "MEMORY_STORE".to_string(),
+                ambiguity_score: None,
+            }),
+            diagnostics: None,
+            conversation_id: None,
+            memories: Some(Vec::new()),
+        })
+    }
+
+    /// MEMORY_RECALL handler: answer from memory only.
+    ///
+    /// If no memories exist, respond naturally (not with an error or RAG fallback).
+    async fn handle_memory_recall(
+        &self,
+        query: &str,
+        convo_summary: Option<&str>,
+        relevant_memories: &[crate::services::memory::RankedMemory],
+        recent_messages: &[crate::services::memory::DbMessage],
+    ) -> Result<AssistantResponse> {
+        use crate::services::prompt_builder::{PromptBuilder, PromptContext};
+
+        let system_prompt = if relevant_memories.is_empty() {
+            "You are a helpful, friendly AI assistant. \
+             The user is asking about personal information that you should have in memory, \
+             but you do not have any recorded information about this yet. \
+             Respond naturally in 1-2 sentences, letting them know you don't have that \
+             information yet and would be happy to remember it if they share it. \
+             Do NOT guess, hallucinate, or attempt to answer from general knowledge."
+        } else {
+            "You are a helpful, friendly AI assistant with access to the user's personal memory. \
+             Answer the user's question using ONLY the information provided in the memories below. \
+             Do not guess or invent facts not present in the memories. \
+             Be concise and direct. 1-3 sentences is ideal."
+        };
+
+        // Split memories by type for the prompt builder
+        let mut long_term_mems: Vec<String> = Vec::new();
+        let mut episodic_mems:  Vec<String> = Vec::new();
+        for rm in relevant_memories {
+            if rm.memory.r#type == "EPISODE" {
+                episodic_mems.push(rm.memory.content.clone());
+            } else {
+                long_term_mems.push(rm.memory.content.clone());
+            }
+        }
+
+        let builder = PromptBuilder::new();
+        let user_prompt = builder.build_user_prompt(&PromptContext {
+            convo_summary,
+            long_term_memories: &long_term_mems,
+            episodic_memories: &episodic_mems,
+            recent_messages,
+            rag_context_markdown: "",
+            query,
+        });
+
+        let answer = self.groq_service.chat_text(system_prompt, &user_prompt).await
+            .unwrap_or_else(|e| {
+                tracing::error!("MEMORY_RECALL generation failed: {}", e);
+                "I'm sorry, I couldn't retrieve that information right now.".to_string()
+            });
+
+        Ok(AssistantResponse {
+            answer,
+            citations: Vec::new(),
+            confidence: Some(crate::domain::ConfidenceReport {
+                confidence: "high".to_string(),
+                confidence_score: 95,
+                reasons: vec![format!(
+                    "Memory recall: {} memories retrieved.", relevant_memories.len()
+                )],
+                status: "MEMORY_RECALL".to_string(),
+                ambiguity_score: None,
+            }),
+            diagnostics: None,
+            conversation_id: None,
+            memories: Some(Self::memories_to_json(relevant_memories)),
+        })
+    }
+
+    /// NORMAL_CHAT handler: social reply, no retrieval at all.
+    async fn handle_normal_chat(
+        &self,
+        query: &str,
+        convo_summary: Option<&str>,
+        recent_messages: &[crate::services::memory::DbMessage],
+    ) -> Result<AssistantResponse> {
+        use crate::services::prompt_builder::{PromptBuilder, PromptContext};
+
+        let system_prompt = "You are a helpful, friendly AI assistant. \
+            Respond naturally and conversationally to the user's message. \
+            Keep your reply brief (1-2 sentences).";
+
+        let builder = PromptBuilder::new();
+        let user_prompt = builder.build_user_prompt(&PromptContext {
+            convo_summary,
+            long_term_memories: &[],
+            episodic_memories: &[],
+            recent_messages,
+            rag_context_markdown: "",
+            query,
+        });
+
+        let answer = self.groq_service.chat_text(system_prompt, &user_prompt).await
+            .unwrap_or_else(|_| "Hello! How can I help you?".to_string());
+
+        Ok(AssistantResponse {
+            answer,
+            citations: Vec::new(),
+            confidence: Some(crate::domain::ConfidenceReport {
+                confidence: "high".to_string(),
+                confidence_score: 100,
+                reasons: vec!["Normal chat: no retrieval required.".to_string()],
+                status: "NORMAL_CHAT".to_string(),
+                ambiguity_score: None,
+            }),
+            diagnostics: None,
+            conversation_id: None,
+            memories: Some(Vec::new()),
+        })
+    }
+
+    /// Converts ranked memories to the JSON format attached to `AssistantResponse.memories`.
+    fn memories_to_json(
+        ranked: &[crate::services::memory::RankedMemory],
+    ) -> Vec<serde_json::Value> {
+        ranked.iter().map(|rm| {
+            let mut val = serde_json::to_value(&rm.memory).unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("similarity".to_string(),      serde_json::Value::from(rm.similarity));
+                obj.insert("importanceScore".to_string(), serde_json::Value::from(rm.importance_score));
+                obj.insert("recencyScore".to_string(),    serde_json::Value::from(rm.recency_score));
+                obj.insert("accessFreqScore".to_string(), serde_json::Value::from(rm.access_freq_score));
+                obj.insert("finalScore".to_string(),      serde_json::Value::from(rm.final_score));
+            }
+            val
+        }).collect()
+    }
+
+
+    pub async fn ask_assistant_rag_core(
+        &self,
+        database: &Database,
+        query: &str,
+        convo_summary: Option<&str>,
+        relevant_memories: &[crate::services::memory::RankedMemory],
+        recent_messages: &[crate::services::memory::DbMessage],
+    ) -> Result<AssistantResponse> {
         // ── RAG_DEBUG_MODE: bypass all confidence gating for diagnosis ─────────
         let debug_mode = std::env::var("RAG_DEBUG_MODE")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
@@ -169,6 +507,8 @@ impl RetrievalService {
                     ambiguity_score: Some(1.0),
                 }),
                 diagnostics: None,
+                conversation_id: None,
+                memories: None,
             });
         } else if !scored_groups.is_empty() && (!should_trigger_ambiguity || matching_groups.len() == 1) {
             let cluster_name = &scored_groups[0].0;
@@ -177,7 +517,14 @@ impl RetrievalService {
                 query, cluster_name
             );
             drop(dict);
-            return self.ask_broad_topic(database, query, cluster_name).await;
+            return self.ask_broad_topic(
+                database,
+                query,
+                cluster_name,
+                convo_summary,
+                relevant_memories,
+                recent_messages,
+            ).await;
         }
         drop(dict);
 
@@ -287,24 +634,57 @@ impl RetrievalService {
         };
 
         // ── Main answer / bypass logic ─────────────────────────────────────────
+        // ── Stage 6: Confidence gate (memory-aware) ──────────────────────────────
+        //
+        // The gate ONLY affects document retrieval confidence.  Memories,
+        // conversation summaries, and recent messages ALWAYS flow through to
+        // the LLM — they are never suppressed by RAG confidence status.
+        //
+        // • EMPTY_RETRIEVAL + memories available  → answer from memory
+        // • EMPTY_RETRIEVAL + no memories         → return graceful fallback
+        // • LOW_CONFIDENCE  + memories available  → answer from memory
+        // • LOW_CONFIDENCE  + no memories         → return graceful fallback
+        // • AMBIGUOUS_RETRIEVAL                   → disambiguation prompt (unchanged)
         let (answer, citations, fact_coverage) = if !debug_mode && confidence_report.status == "EMPTY_RETRIEVAL" {
-            let fallback_answer = format!(
-                "I could not find relevant information in the connected knowledge base.\n\nStatus: EMPTY_RETRIEVAL\nConfidence: {}/100\n\nReasons:\n{}",
-                confidence_report.confidence_score,
-                confidence_report.reasons.iter().map(|r| format!("- {}", r)).collect::<Vec<_>>().join("\n")
-            );
-            (fallback_answer, Vec::new(), 1.0_f32)
+            if !relevant_memories.is_empty() {
+                // Answer from memory instead of returning a hard fallback
+                let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
+                let empty_ctx = BuiltContext { context_text: String::new(), chunks: Vec::new() };
+                let raw_ans = self.generate_answer(
+                    query, &retrieval.analysis, &empty_ctx,
+                    convo_summary, &lt_mems, &ep_mems, recent_messages,
+                ).await?;
+                (raw_ans, Vec::new(), 1.0_f32)
+            } else {
+                let fallback_answer = format!(
+                    "I could not find relevant information in the connected knowledge base.\n\nStatus: EMPTY_RETRIEVAL\nConfidence: {}/100\n\nReasons:\n{}",
+                    confidence_report.confidence_score,
+                    confidence_report.reasons.iter().map(|r| format!("- {}", r)).collect::<Vec<_>>().join("\n")
+                );
+                (fallback_answer, Vec::new(), 1.0_f32)
+            }
         } else if !debug_mode && confidence_report.status == "LOW_CONFIDENCE_RETRIEVAL" && top_normalized_rerank <= 0.90 {
-            let sources = doc_aggregations.iter()
-                .map(|d| format!("- {} ({})", d.document_title, d.source))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let fallback_answer = format!(
-                "I found potentially relevant information but confidence is low.\n\nStatus: LOW_CONFIDENCE_RETRIEVAL\nConfidence: {}/100\n\nRetrieved Sources:\n{}\n\nPlease refine your query to be more specific or add more context.",
-                confidence_report.confidence_score,
-                sources
-            );
-            (fallback_answer, Vec::new(), 1.0_f32)
+            if !relevant_memories.is_empty() {
+                // Answer from memory — don't return LOW_CONFIDENCE fallback string
+                let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
+                let empty_ctx = BuiltContext { context_text: String::new(), chunks: Vec::new() };
+                let raw_ans = self.generate_answer(
+                    query, &retrieval.analysis, &empty_ctx,
+                    convo_summary, &lt_mems, &ep_mems, recent_messages,
+                ).await?;
+                (raw_ans, Vec::new(), 1.0_f32)
+            } else {
+                let sources = doc_aggregations.iter()
+                    .map(|d| format!("- {} ({})", d.document_title, d.source))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let fallback_answer = format!(
+                    "I found potentially relevant information but confidence is low.\n\nStatus: LOW_CONFIDENCE_RETRIEVAL\nConfidence: {}/100\n\nRetrieved Sources:\n{}\n\nPlease refine your query to be more specific or add more context.",
+                    confidence_report.confidence_score,
+                    sources
+                );
+                (fallback_answer, Vec::new(), 1.0_f32)
+            }
         } else if !debug_mode && confidence_report.status == "AMBIGUOUS_RETRIEVAL" {
             let subject = self.entity_dictionary.read().await.extract_subject(query)
                 .unwrap_or_else(|| {
@@ -403,8 +783,29 @@ impl RetrievalService {
                     0,
                 )
             } else {
-                let raw_ans = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
-                verify_and_ground_answer(&self.ollama_service, &raw_ans, &top_chunks).await?
+                let mut long_term_mems = Vec::new();
+                let mut episodic_mems = Vec::new();
+                for rm in relevant_memories {
+                    if rm.memory.r#type == "EPISODE" {
+                        episodic_mems.push(rm.memory.content.clone());
+                    } else {
+                        long_term_mems.push(rm.memory.content.clone());
+                    }
+                }
+                let raw_ans = self.generate_answer(
+                    query,
+                    &retrieval.analysis,
+                    &built_context,
+                    convo_summary,
+                    &long_term_mems,
+                    &episodic_mems,
+                    recent_messages,
+                ).await?;
+                {
+                    let memory_strs: Vec<String> = relevant_memories.iter()
+                        .map(|rm| rm.memory.content.clone()).collect();
+                    verify_and_ground_answer(&self.ollama_service, &raw_ans, &top_chunks, &memory_strs).await?
+                }
             };
 
             // Build citations
@@ -649,6 +1050,8 @@ impl RetrievalService {
             citations,
             confidence: Some(confidence_report),
             diagnostics: Some(diagnostics),
+            conversation_id: None,
+            memories: None,
         })
     }
 
@@ -1018,6 +1421,9 @@ impl RetrievalService {
         database: &Database,
         query: &str,
         cluster_name: &str,
+        convo_summary: Option<&str>,
+        relevant_memories: &[crate::services::memory::RankedMemory],
+        recent_messages: &[crate::services::memory::DbMessage],
     ) -> Result<AssistantResponse> {
         let dict = self.entity_dictionary.read().await;
         tracing::info!(
@@ -1045,9 +1451,11 @@ impl RetrievalService {
             let reranked = self.reranker_service.rerank(query, retrieval_results, 10).await?;
             let top_chunks: Vec<RetrievedChunk> = reranked.into_iter().take(3).collect();
             let built_context = self.context_builder.build(top_chunks.clone());
-            let raw_answer = self.generate_answer(query, &retrieval.analysis, &built_context).await?;
+            let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
+            let raw_answer = self.generate_answer(query, &retrieval.analysis, &built_context, convo_summary, &lt_mems, &ep_mems, recent_messages).await?;
 
-            let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks).await?;
+            let memory_strs: Vec<String> = relevant_memories.iter().map(|rm| rm.memory.content.clone()).collect();
+            let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks, &memory_strs).await?;
 
             let mut raw_citations: Vec<Citation> = top_chunks.iter().map(|c| {
                 let section = c.metadata.get("section")
@@ -1127,7 +1535,14 @@ impl RetrievalService {
                 status: "OK".to_string(),
                 ambiguity_score: Some(0.0),
             };
-            return Ok(AssistantResponse { answer, citations, confidence: Some(confidence_report), diagnostics: None });
+            return Ok(AssistantResponse {
+                answer,
+                citations,
+                confidence: Some(confidence_report),
+                diagnostics: None,
+                conversation_id: None,
+                memories: None,
+            });
         }
 
         // Step 2: For each doc in the cluster, fetch its top chunks
@@ -1169,6 +1584,8 @@ impl RetrievalService {
                 citations: vec![],
                 confidence: Some(confidence_report),
                 diagnostics: None,
+                conversation_id: None,
+                memories: None,
             });
         }
 
@@ -1194,11 +1611,13 @@ impl RetrievalService {
             strategy: RetrievalStrategy::Hybrid,
         };
 
+        let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
         let raw_answer = self
-            .generate_answer(query, &dummy_analysis, &built_context)
+            .generate_answer(query, &dummy_analysis, &built_context, convo_summary, &lt_mems, &ep_mems, recent_messages)
             .await?;
 
-        let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks).await?;
+        let memory_strs: Vec<String> = relevant_memories.iter().map(|rm| rm.memory.content.clone()).collect();
+        let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks, &memory_strs).await?;
 
         // Step 6: Build citations for all contributing docs
         let dict = self.entity_dictionary.read().await;
@@ -1295,6 +1714,8 @@ impl RetrievalService {
             citations,
             confidence: Some(confidence_report),
             diagnostics: None,
+            conversation_id: None,
+            memories: None,
         })
     }
 
@@ -2012,7 +2433,6 @@ impl RetrievalService {
                             total_boost += (total_mentions as f32 * 0.5_f32).min(2.0_f32);
                         }
                     }
-
                     // Section density boost (halved from density * 8.0)
                     let section_density =
                         calculate_entity_section_density(&chunk.content, &query_entities, &dict);
@@ -2069,6 +2489,10 @@ impl RetrievalService {
         query: &str,
         analysis: &QueryAnalysis,
         context: &BuiltContext,
+        convo_summary: Option<&str>,
+        long_term_mems: &[String],
+        episodic_mems: &[String],
+        recent_messages: &[crate::services::memory::DbMessage],
     ) -> Result<String> {
         let dict = self.entity_dictionary.read().await;
         let intent_type = determine_query_intent(query, analysis, &dict);
@@ -2154,14 +2578,20 @@ impl RetrievalService {
             }
         };
 
-        let user_prompt = format!(
-            "User query: {query}\n\
-             \n\
-             Structured Context:\n\
-             {context_markdown}\n\
-             \n\
-             Remember: Output only the direct answer text. Do not include source metadata, citations, or file names."
-        );
+        // Delegate prompt assembly to the canonical PromptBuilder.
+        // This ensures the same ordered structure (summary → memories → episodes
+        // → recent_messages → RAG docs → query) across all execution paths.
+        let user_prompt = {
+            use crate::services::prompt_builder::{PromptBuilder, PromptContext};
+            PromptBuilder::new().build_user_prompt(&PromptContext {
+                convo_summary,
+                long_term_memories: long_term_mems,
+                episodic_memories: episodic_mems,
+                recent_messages,
+                rag_context_markdown: &context_markdown,
+                query,
+            })
+        };
 
         self.groq_service.chat_text(&system_prompt, &user_prompt).await
     }
@@ -2738,6 +3168,25 @@ fn tokenize_text(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Splits ranked memories into (long_term_strings, episodic_strings) for the prompt builder.
+///
+/// Episodic memories have `type == "EPISODE"`, everything else is long-term.
+fn split_memories_by_type(
+    ranked: &[crate::services::memory::RankedMemory],
+) -> (Vec<String>, Vec<String>) {
+    let mut long_term = Vec::new();
+    let mut episodic = Vec::new();
+    for rm in ranked {
+        if rm.memory.r#type == "EPISODE" {
+            episodic.push(rm.memory.content.clone());
+        } else {
+            long_term.push(rm.memory.content.clone());
+        }
+    }
+    (long_term, episodic)
+}
+
+
 fn extract_comparison_entities(query: &str) -> Vec<String> {
     let q_lower = query.to_lowercase();
     let mut clean = q_lower;
@@ -2795,6 +3244,10 @@ async fn verify_and_ground_answer(
     ollama_service: &OllamaService,
     answer: &str,
     chunks: &[RetrievedChunk],
+    // Memory strings are treated as first-class grounding sources.
+    // Memory-derived facts (name, project, preferences) are never stripped
+    // simply because they are absent from the document corpus.
+    memory_strings: &[String],
 ) -> Result<(String, usize, usize, usize)> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
@@ -2870,25 +3323,30 @@ async fn verify_and_ground_answer(
     let mut sentence_embeddings = HashMap::new();
     let mut chunk_embeddings = Vec::new();
 
-    if !candidate_sentences.is_empty() && !chunks.is_empty() {
+    // Build a unified list of grounding sources: RAG chunks + memory strings.
+    // This ensures memory-derived facts are never stripped by the verifier.
+    let mut all_source_texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+    let memory_source_start = all_source_texts.len(); // index where memory strings begin
+    all_source_texts.extend_from_slice(memory_strings);
+
+    if !candidate_sentences.is_empty() && !all_source_texts.is_empty() {
         let mut batch_inputs = candidate_sentences.clone();
-        for chunk in chunks {
-            batch_inputs.push(chunk.content.clone());
-        }
+        batch_inputs.extend(all_source_texts.clone());
 
         match ollama_service.generate_embeddings(&batch_inputs).await {
             Ok(all_embeddings) => {
-                let (sent_embs, chunk_embs) = all_embeddings.split_at(candidate_sentences.len());
+                let (sent_embs, source_embs) = all_embeddings.split_at(candidate_sentences.len());
                 for (sent, emb) in candidate_sentences.iter().zip(sent_embs) {
                     sentence_embeddings.insert(sent.clone(), emb.clone());
                 }
-                chunk_embeddings = chunk_embs.to_vec();
+                chunk_embeddings = source_embs.to_vec();
             }
             Err(err) => {
                 tracing::warn!("[ANSWER_VERIFIER] Failed to generate embeddings via Ollama: {}. Falling back to keyword overlap only.", err);
             }
         }
     }
+    let _ = memory_source_start; // used logically — all_source_texts is the combined pool
 
     let mut total_sentences = 0;
     let mut kept_sentences = 0;
@@ -2921,8 +3379,9 @@ async fn verify_and_ground_answer(
                     let mut best_score = 0.0_f32;
                     let mut best_chunk_id = None;
 
-                    for (chunk_idx, chunk) in chunks.iter().enumerate() {
-                        let chunk_tokens = tokenize_text(&chunk.content);
+                    // Score against all sources: RAG chunks + memory strings (unified pool)
+                    for (src_idx, src_text) in all_source_texts.iter().enumerate() {
+                        let chunk_tokens = tokenize_text(src_text);
                         let keyword_overlap = if sentence_tokens.is_empty() {
                             1.0_f32
                         } else {
@@ -2930,11 +3389,11 @@ async fn verify_and_ground_answer(
                             intersection as f32 / sentence_tokens.len() as f32
                         };
 
-                        let semantic_similarity = if let (Some(sent_emb), Some(chunk_emb)) = (
+                        let semantic_similarity = if let (Some(sent_emb), Some(src_emb)) = (
                             sentence_embeddings.get(&sentence),
-                            chunk_embeddings.get(chunk_idx),
+                            chunk_embeddings.get(src_idx),
                         ) {
-                            cosine_similarity(sent_emb, chunk_emb)
+                            cosine_similarity(sent_emb, src_emb)
                         } else {
                             keyword_overlap
                         };
@@ -2942,7 +3401,12 @@ async fn verify_and_ground_answer(
                         let support_score = 0.7 * semantic_similarity + 0.3 * keyword_overlap;
                         if support_score > best_score {
                             best_score = support_score;
-                            best_chunk_id = Some(chunk.chunk_id.clone());
+                            // Use chunk_id for RAG sources, "memory" label for memory sources
+                            best_chunk_id = if src_idx < chunks.len() {
+                                Some(chunks[src_idx].chunk_id.clone())
+                            } else {
+                                Some("memory".to_string())
+                            };
                         }
                     }
 

@@ -18,6 +18,10 @@ pub struct Database {
 }
 
 impl Database {
+    pub fn get_connection(&self) -> Arc<Mutex<Connection>> {
+        self.connection.clone()
+    }
+
     pub fn connect(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -72,6 +76,16 @@ impl Database {
         let sql_002 = include_str!("migrations/002_topic_graph.sql");
         connection.execute_batch(sql_002)?;
 
+        // Phase 3: Memory tables (idempotent via CREATE TABLE IF NOT EXISTS)
+        let sql_003 = include_str!("migrations/003_memory.sql");
+        connection.execute_batch(sql_003)?;
+
+        // Alter chat_messages to include token_count, retrieved_document_ids, retrieved_memory_ids, and citations safely
+        let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN token_count INTEGER DEFAULT 0", []);
+        let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN retrieved_document_ids TEXT", []);
+        let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN retrieved_memory_ids TEXT", []);
+        let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN citations TEXT", []);
+
         Ok(())
     }
 
@@ -82,6 +96,24 @@ impl Database {
         connection.execute("DELETE FROM sync_state", [])?;
         connection.execute("DELETE FROM documents", [])?;
         connection.execute("DELETE FROM chunk_fts", [])?;
+        connection.execute("UPDATE integrations SET status = 'not_connected', detail = NULL, last_synced_at = NULL", [])?;
+        connection.execute("UPDATE settings SET obsidian_vault_path = NULL", [])?;
+        Ok(())
+    }
+
+    pub fn reset_assistant_data(&self) -> Result<()> {
+        let connection = self.connection.lock().expect("db lock poisoned");
+        connection.execute("DELETE FROM credentials", [])?;
+        connection.execute("DELETE FROM chat_messages", [])?;
+        connection.execute("DELETE FROM sync_state", [])?;
+        connection.execute("DELETE FROM documents", [])?;
+        connection.execute("DELETE FROM chunks", [])?;
+        connection.execute("DELETE FROM chunk_fts", [])?;
+        connection.execute("DELETE FROM chats", [])?;
+        connection.execute("DELETE FROM conversation_summaries", [])?;
+        connection.execute("DELETE FROM memories", [])?;
+        connection.execute("DELETE FROM document_clusters", [])?;
+        connection.execute("DELETE FROM document_graph_edges", [])?;
         connection.execute("UPDATE integrations SET status = 'not_connected', detail = NULL, last_synced_at = NULL", [])?;
         connection.execute("UPDATE settings SET obsidian_vault_path = NULL", [])?;
         Ok(())

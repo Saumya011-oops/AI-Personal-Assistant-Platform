@@ -27,7 +27,7 @@ export async function invokeCommand<T extends TauriCommandName>(
   try {
     rawResult = await invoke(
       command,
-      toSnakeCaseObject(parsedInput) as InvokeArgs,
+      parsedInput as InvokeArgs,
     );
   } catch (error) {
     throw toAppError('COMMAND_FAILED', 'Failed to execute desktop command', {
@@ -44,19 +44,3 @@ export async function invokeCommand<T extends TauriCommandName>(
   return parsed.data;
 }
 
-function toSnakeCaseObject(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(toSnakeCaseObject);
-  }
-
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
-        key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
-        toSnakeCaseObject(nestedValue),
-      ]),
-    );
-  }
-
-  return value;
-}

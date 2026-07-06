@@ -5,3 +5,4 @@ pub mod integrations;
 pub mod notion;
 pub mod obsidian;
 pub mod settings;
+pub mod memory;

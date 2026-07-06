@@ -338,6 +338,8 @@ pub struct AssistantResponse {
     pub citations: Vec<Citation>,
     pub confidence: Option<ConfidenceReport>,
     pub diagnostics: Option<DiagnosticsPayload>,
+    pub conversation_id: Option<String>,
+    pub memories: Option<Vec<Value>>,
 }
 
 // ---------------------------------------------------------------------------

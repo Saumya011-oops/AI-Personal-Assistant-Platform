@@ -100,14 +100,24 @@ async fn main() -> Result<()> {
     let context_builder = ContextBuilder::new();
 
     let retrieval_service = RetrievalService::new(
-        ollama_service,
+        ollama_service.clone(),
         qdrant_service,
         sparse_service,
-        groq_service,
+        groq_service.clone(),
         query_analyzer_service,
         reranker_service,
         context_builder,
     );
+
+    let memory_service = assistant_core::services::memory::MemoryService::new(
+        database.clone(),
+        ollama_service,
+        groq_service,
+        &config.qdrant_url,
+    );
+
+    println!("Initializing Memory Service...");
+    memory_service.initialize().await.context("Failed to initialize memory service")?;
 
     println!("Initializing Retrieval Service...");
     retrieval_service.initialize(&database).await.context("Failed to initialize retrieval service")?;
@@ -123,7 +133,8 @@ async fn main() -> Result<()> {
         println!("\n[{}/{}] Running ID: {} Category: {} | Query: \"{}\"", idx + 1, queries.len(), q.id, q.category, q.query);
         
         let start = Instant::now();
-        let response_res = retrieval_service.ask_assistant(&database, &q.query).await;
+        let intent_router = assistant_core::services::intent_router::IntentRouter::new();
+        let response_res = retrieval_service.ask_assistant(&database, &memory_service, &q.query, "eval-chat", &intent_router).await;
         let latency = start.elapsed().as_millis() as u64;
 
         match response_res {

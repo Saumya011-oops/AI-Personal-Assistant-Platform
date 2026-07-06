@@ -8,6 +8,14 @@ import {
   Loader2,
   Trash2,
   X,
+  Plus,
+  Search,
+  MessageSquare,
+  Edit,
+  Brain,
+  Download,
+  Upload,
+  Check,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Citation, NormalizedDocument } from '@assistant/shared';
@@ -23,6 +31,7 @@ interface Message {
   citations?: Citation[];
   isError?: boolean;
   diagnostics?: any;
+  memories?: any[];
 }
 
 const WELCOME_MESSAGE: Message = {
@@ -35,8 +44,17 @@ export function AssistantPage() {
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
   const [isLoading, setIsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'citations' | 'sources' | 'activity'>('citations');
+  const [activeTab, setActiveTab] = useState<'citations' | 'sources' | 'activity' | 'memories' | 'conversation'>('citations');
   const [selectedDoc, setSelectedDoc] = useState<NormalizedDocument | null>(null);
+
+  // Chat History & Memories State
+  const [chats, setChats] = useState<any[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState('');
+  const [conversationSummary, setConversationSummary] = useState('');
+  const [memoryReady, setMemoryReady] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -46,6 +64,30 @@ export function AssistantPage() {
 
   const citationItems = (documents.data ?? []).slice(0, 8);
   const connectedSources = (integrations.data ?? []).filter((i) => i.status === 'connected');
+
+  const loadChats = async () => {
+    try {
+      const chatList = await invokeCommand('list_chats', {});
+      setChats(chatList || []);
+    } catch (e) {
+      console.error('Failed to load chats:', e);
+    }
+  };
+
+  const checkMemoryStatus = async () => {
+    try {
+      // RAG and Memory collection status check
+      await invokeCommand('list_memories', {});
+      setMemoryReady(true);
+    } catch (e) {
+      setMemoryReady(false);
+    }
+  };
+
+  useEffect(() => {
+    loadChats();
+    checkMemoryStatus();
+  }, []);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -60,6 +102,115 @@ export function AssistantPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const handleSelectChat = async (id: string) => {
+    try {
+      setActiveConversationId(id);
+      setRenamingChatId(null);
+      
+      const msgsResp = await invokeCommand('load_chat_messages', { conversationId: id });
+      const dbMsgs = msgsResp || [];
+      const formattedMsgs: Message[] = dbMsgs.map((m: any) => {
+        return {
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          citations: (() => {
+            if (typeof m.citations !== 'string' || !m.citations.trim()) return undefined;
+            try {
+              return JSON.parse(m.citations);
+            } catch {
+              return undefined;
+            }
+          })(),
+        };
+      });
+      
+      if (formattedMsgs.length === 0) {
+        setMessages([WELCOME_MESSAGE]);
+      } else {
+        setMessages(formattedMsgs);
+      }
+
+      // Fetch summary defensively
+      try {
+        const summaryResp = await invokeCommand('get_conversation_summary', { conversationId: id });
+        setConversationSummary(summaryResp || '');
+      } catch (summaryError) {
+        console.error('Failed to load conversation summary:', summaryError);
+        setConversationSummary('');
+      }
+    } catch (e) {
+      console.error('Failed to load chat history:', e);
+    }
+  };
+
+  const handleNewChat = () => {
+    setActiveConversationId(null);
+    setMessages([WELCOME_MESSAGE]);
+    setConversationSummary('');
+    setRenamingChatId(null);
+  };
+
+  const handleDeleteChat = async (id: string) => {
+    if (!window.confirm("Are you sure you want to delete this conversation?")) return;
+    try {
+      await invokeCommand('delete_chat', { id });
+      loadChats();
+      if (activeConversationId === id) {
+        handleNewChat();
+      }
+    } catch (e) {
+      console.error('Failed to delete chat:', e);
+    }
+  };
+
+  const handleSaveRename = async (id: string) => {
+    if (!renameText.trim()) return;
+    try {
+      await invokeCommand('rename_chat', { id, title: renameText });
+      setRenamingChatId(null);
+      loadChats();
+    } catch (e) {
+      console.error('Failed to rename chat:', e);
+    }
+  };
+
+  const getGroupedChats = () => {
+    const grouped = {
+      Today: [] as any[],
+      Yesterday: [] as any[],
+      'Last Week': [] as any[],
+      Older: [] as any[],
+    };
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const lastWeek = new Date(today);
+    lastWeek.setDate(lastWeek.getDate() - 7);
+
+    const filtered = chats.filter((c) =>
+      (c.title || '').toLowerCase().includes(chatSearchQuery.toLowerCase()) ||
+      (c.summary || '').toLowerCase().includes(chatSearchQuery.toLowerCase())
+    );
+
+    filtered.forEach((chat) => {
+      if (!chat.updated_at) return;
+      const chatDate = new Date(chat.updated_at.replace(' ', 'T') + 'Z');
+      if (chatDate >= today) {
+        grouped.Today.push(chat);
+      } else if (chatDate >= yesterday) {
+        grouped.Yesterday.push(chat);
+      } else if (chatDate >= lastWeek) {
+        grouped['Last Week'].push(chat);
+      } else {
+        grouped.Older.push(chat);
+      }
+    });
+
+    return grouped;
+  };
+
   const handleSend = async (textToSend?: string) => {
     const query = (textToSend ?? inputText).trim();
     if (!query || isLoading) return;
@@ -70,14 +221,33 @@ export function AssistantPage() {
     setIsLoading(true);
 
     try {
-      const response = await invokeCommand('ask_assistant', { query });
+      const response: any = await invokeCommand('ask_assistant', {
+        query,
+        conversationId: activeConversationId || undefined,
+      });
       const assistantMsg: Message = {
         role: 'assistant',
         content: response.answer,
         citations: response.citations,
         diagnostics: response.diagnostics,
+        memories: response.memories,
       };
       setMessages((prev) => [...prev, assistantMsg]);
+
+      if (response.conversationId) {
+        setActiveConversationId(response.conversationId);
+        loadChats();
+        
+        // Fetch summary defensively
+        try {
+          const summaryResp = await invokeCommand('get_conversation_summary', {
+            conversationId: response.conversationId,
+          });
+          setConversationSummary(summaryResp || '');
+        } catch (summaryError) {
+          console.error('Failed to load conversation summary:', summaryError);
+        }
+      }
     } catch (error: unknown) {
       console.error('Error invoking ask_assistant:', error);
       
@@ -154,8 +324,116 @@ export function AssistantPage() {
     };
   });
 
+  const groupedChats = getGroupedChats();
+  const activeChat = chats.find((c) => c.id === activeConversationId);
+  const activeChatTitle = activeChat ? activeChat.title : 'New Chat';
+
   return (
     <div className="flex h-[calc(100vh-8.5rem)] max-w-[1600px] mx-auto gap-6 animate-slide-up relative">
+      {/* ── Left Sidebar: Chat History ──────────────────────── */}
+      <aside className="w-[260px] shrink-0 flex flex-col border-r border-surface-container-highest/30 bg-surface-container-low/10 -ml-6 -my-6 py-6 px-4">
+        {/* New Chat Button */}
+        <button
+          onClick={handleNewChat}
+          className="flex items-center justify-center gap-2 rounded-xl bg-primary-glass px-4 py-3 text-[13px] font-bold text-black shadow-lg hover:glow active:scale-95 transition-all mb-4"
+        >
+          <Plus size={16} />
+          New Chat
+        </button>
+
+        {/* Search Input */}
+        <div className="flex items-center gap-2 rounded-xl border border-outline-variant/20 bg-[#0b1326]/20 px-3 py-2 mb-4">
+          <Search size={14} className="text-outline shrink-0" />
+          <input
+            type="text"
+            placeholder="Search chats..."
+            value={chatSearchQuery}
+            onChange={(e) => setChatSearchQuery(e.target.value)}
+            className="flex-1 bg-transparent text-[12px] text-on-surface focus:outline-none placeholder:text-outline min-w-0"
+          />
+        </div>
+
+        {/* Chats List grouped by date */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar space-y-4 pr-1">
+          {Object.entries(groupedChats).map(([group, groupChats]) => {
+            if ((groupChats as any[]).length === 0) return null;
+            return (
+              <div key={group} className="space-y-1">
+                <p className="font-mono text-[9px] font-bold uppercase tracking-widest text-outline px-2 mb-1">
+                  {group}
+                </p>
+                <div className="space-y-0.5">
+                  {(groupChats as any[]).map((chat) => {
+                    const isActive = chat.id === activeConversationId;
+                    const isRenaming = renamingChatId === chat.id;
+                    return (
+                      <div
+                        key={chat.id}
+                        onClick={() => !isRenaming && handleSelectChat(chat.id)}
+                        className={`group relative flex items-center justify-between rounded-xl px-3 py-2.5 cursor-pointer transition-all border border-transparent ${
+                          isActive
+                            ? 'bg-primary-glass/10 border-primary-glass/20 text-primary-glass font-medium'
+                            : 'hover:bg-surface-container-high/40 text-on-surface-variant hover:text-on-surface'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <MessageSquare size={14} className="shrink-0 text-outline group-hover:text-on-surface" />
+                          {isRenaming ? (
+                            <input
+                              type="text"
+                              value={renameText}
+                              onChange={(e) => setRenameText(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSaveRename(chat.id);
+                                if (e.key === 'Escape') setRenamingChatId(null);
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              autoFocus
+                              className="flex-1 bg-[#0b1326]/60 border border-primary-glass/50 rounded px-1.5 py-0.5 text-[12px] text-on-surface focus:outline-none"
+                            />
+                          ) : (
+                            <span className="text-[12px] truncate font-light leading-snug">
+                              {chat.title || 'Untitled Conversation'}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Hover actions */}
+                        {!isRenaming && (
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRenamingChatId(chat.id);
+                                setRenameText(chat.title || '');
+                              }}
+                              className="p-1 hover:bg-surface-container-highest rounded text-outline hover:text-on-surface transition-colors"
+                              title="Rename chat"
+                            >
+                              <Edit size={11} />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteChat(chat.id);
+                              }}
+                              className="p-1 hover:bg-destructive/15 rounded text-outline hover:text-destructive transition-colors"
+                              title="Delete chat"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </aside>
+
       {/* ── Main Chat Panel ────────────────────────────────── */}
       <section className="flex flex-1 flex-col overflow-hidden min-w-0">
 
@@ -169,10 +447,18 @@ export function AssistantPage() {
                 Conversation
               </p>
               <h3 className="text-[15px] font-semibold text-on-surface">
-                Grounded response session
+                {activeChatTitle}
               </h3>
             </div>
             <div className="flex items-center gap-2">
+              {memoryReady && (
+                <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-400">
+                  Memory Ready
+                </span>
+              )}
+              <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-400">
+                Retrieval Ready
+              </span>
               <span className="rounded-full border border-tertiary/20 bg-tertiary/10 px-3 py-1 text-[11px] font-medium text-tertiary">
                 Streaming-ready
               </span>
@@ -473,10 +759,13 @@ export function AssistantPage() {
           <h3 className="text-[18px] font-semibold text-on-surface">Evidence, sources, and activity</h3>
         </div>
 
-        {/* Tabs: Citations / Sources / Activity */}
-        <div className="flex border-b border-surface-container-highest/40 mt-4 mb-4 relative">
-          {(['citations', 'sources', 'activity'] as const).map((tab) => {
+        {/* Tabs: Citations / Sources / Activity / Memories / Conversation */}
+        <div className="flex border-b border-surface-container-highest/40 mt-4 mb-4 relative overflow-x-auto no-scrollbar">
+          {(['citations', 'sources', 'activity', 'memories', 'conversation'] as const).map((tab) => {
             const isActive = activeTab === tab;
+            let displayLabel: string = tab;
+            if (tab === 'activity') displayLabel = 'log';
+            if (tab === 'conversation') displayLabel = 'summary';
             return (
               <button
                 key={tab}
@@ -495,7 +784,7 @@ export function AssistantPage() {
                     transition={{ type: 'spring', stiffness: 380, damping: 30 }}
                   />
                 )}
-                <span className="relative z-10">{tab}</span>
+                <span className="relative z-10">{displayLabel}</span>
               </button>
             );
           })}
@@ -680,6 +969,57 @@ export function AssistantPage() {
                       );
                     })}
                   </div>
+                </div>
+              )}
+
+              {activeTab === 'memories' && (
+                <div className="space-y-3">
+                  <p className="text-[11px] text-outline font-semibold mb-2 uppercase tracking-wider">Used Memories (Latest Turn)</p>
+                  {(() => {
+                    const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+                    const usedMemories = lastAssistant?.memories || [];
+                    if (usedMemories.length === 0) {
+                      return (
+                        <div className="rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-6 text-center text-on-surface-variant text-[13px]">
+                          No memories retrieved in the latest conversation turn.
+                        </div>
+                      );
+                    }
+                    return usedMemories.map((m: any, index: number) => (
+                      <div
+                        key={m.id || index}
+                        className="rounded-xl border border-outline-variant/15 bg-surface-container-high/30 p-4 space-y-2"
+                      >
+                        <p className="text-[13px] text-on-surface leading-relaxed font-light">{m.content}</p>
+                        <div className="flex flex-wrap items-center gap-2 text-[10px] text-outline">
+                          <span className="font-bold text-primary-glass bg-primary-glass/10 px-1.5 py-0.5 rounded border border-primary-glass/25 uppercase text-[8px] tracking-wider">
+                            {m.type}
+                          </span>
+                          <span>Score: <strong>{m.finalScore ? (m.finalScore * 100).toFixed(0) : (m.similarity * 100).toFixed(0)}%</strong></span>
+                          <span>•</span>
+                          <span>Importance: <strong>{m.importanceScore || m.importance}/10</strong></span>
+                        </div>
+                        {m.last_used && (
+                          <p className="text-[9px] text-outline">Last Used: {new Date(m.last_used.replace(' ', 'T') + 'Z').toLocaleString()}</p>
+                        )}
+                      </div>
+                    ));
+                  })()}
+                </div>
+              )}
+
+              {activeTab === 'conversation' && (
+                <div className="space-y-3">
+                  <p className="text-[11px] text-outline font-semibold mb-2 uppercase tracking-wider">Active Chat Summary</p>
+                  {conversationSummary ? (
+                    <div className="rounded-xl border border-outline-variant/15 bg-surface-container-high/30 p-4 text-[13px] text-on-surface-variant leading-relaxed font-light whitespace-pre-wrap">
+                      {conversationSummary}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-outline-variant/20 bg-surface-container-high/30 p-6 text-center text-on-surface-variant text-[13px]">
+                      No summary available yet. Summaries are auto-generated as the chat history grows.
+                    </div>
+                  )}
                 </div>
               )}
             </motion.div>

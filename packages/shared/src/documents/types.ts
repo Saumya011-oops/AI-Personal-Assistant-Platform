@@ -125,6 +125,8 @@ export const assistantResponseSchema = z.object({
   answer: z.string(),
   citations: z.array(citationSchema),
   diagnostics: z.any().optional().nullable(),
+  conversationId: z.string().optional().nullable(),
+  memories: z.array(z.any()).optional().nullable(),
 });
 
 export type QueryAnalysis = z.infer<typeof queryAnalysisSchema>;

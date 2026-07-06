@@ -30,6 +30,9 @@ pub mod qdrant;
 pub mod reranker;
 pub mod retrieval;
 pub mod pipeline;
+pub mod memory;
+pub mod intent_router;
+pub mod prompt_builder;
 
 use crate::integrations::obsidian::ObsidianIntegration;
 
@@ -41,6 +44,8 @@ pub struct AppState {
     pub credential_service: Arc<CredentialService>,
     pub pipeline_service: Arc<pipeline::PipelineService>,
     pub retrieval_service: Arc<retrieval::RetrievalService>,
+    pub memory_service: Arc<memory::MemoryService>,
+    pub intent_router: intent_router::IntentRouter,
     pub oauth_pending_state: Arc<Mutex<Option<PendingOAuthState>>>,
     pub app_handle: AppHandle,
 }
