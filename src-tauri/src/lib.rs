@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod evaluation;
 pub mod integrations;
 pub mod services;
 pub mod tasks;
