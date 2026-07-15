@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
     
     // Connect to Database
     let database = Database::connect(&config.database_path).context("Failed to connect to database")?;
+    database.run_migrations().context("Failed to run database migrations")?;
     
     // Initialize services
     let ollama_service = OllamaService::new(
@@ -72,8 +73,11 @@ async fn main() -> Result<()> {
         config.qdrant_url.clone(),
         config.qdrant_collection.clone(),
     );
+    // Use the shared sparse worker on port 8741 which is already running with
+    // 220 documents indexed. The eval binary will call rebuild_index() after
+    // initialize() to ensure a consistent, up-to-date index.
     let sparse_service = SparseRetrievalService::new(
-        config.sparse_helper_port,
+        config.sparse_helper_port,   // 8741 — already running
         config.sparse_helper_script_path(),
         config.node_binary.clone(),
     );
@@ -129,12 +133,23 @@ async fn main() -> Result<()> {
 
     let mut results = Vec::new();
 
+    // Create the evaluation conversation in the chats table so memory service
+    // FK writes don't fail. INSERT OR IGNORE is idempotent across runs.
+    {
+        let conn = database.get_connection();
+        let conn = conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT OR IGNORE INTO chats (id, title) VALUES ('eval-chat', 'Evaluation Session')",
+            [],
+        ).context("Failed to create eval-chat conversation row")?;
+    }
+
     for (idx, q) in queries.iter().enumerate() {
         println!("\n[{}/{}] Running ID: {} Category: {} | Query: \"{}\"", idx + 1, queries.len(), q.id, q.category, q.query);
         
         let start = Instant::now();
         let intent_router = assistant_core::services::intent_router::IntentRouter::new();
-        let response_res = retrieval_service.ask_assistant(&database, &memory_service, &q.query, "eval-chat", &intent_router).await;
+        let response_res = retrieval_service.ask_assistant_with_mode(&database, &memory_service, &q.query, "eval-chat", &intent_router, assistant_core::domain::RetrievalMode::Evaluation).await;
         let latency = start.elapsed().as_millis() as u64;
 
         match response_res {
@@ -379,10 +394,14 @@ async fn main() -> Result<()> {
         "failed_queries": total - passed_count,
         "category_scores": category_scores,
     });
-    let scorecard_path = "src-tauri/evaluation_scorecard.json";
-    let mut scorecard_file = File::create(scorecard_path)?;
+    // Write outputs to reports/ at the project root (never inside src-tauri/ which
+    // Tauri's file watcher monitors — writing there causes infinite rebuild loops).
+    let reports_dir = std::path::Path::new("reports");
+    std::fs::create_dir_all(reports_dir)?;
+    let scorecard_path = reports_dir.join("evaluation_scorecard.json");
+    let mut scorecard_file = File::create(&scorecard_path)?;
     serde_json::to_writer_pretty(&mut scorecard_file, &scorecard)?;
-    println!("\nSaved scorecard to: {}", scorecard_path);
+    println!("\nSaved scorecard to: {}", scorecard_path.display());
 
     // Generate markdown report
     let mut report_md = String::new();
@@ -433,18 +452,19 @@ async fn main() -> Result<()> {
         ));
     }
 
-    let report_path = "src-tauri/evaluation_report.md";
-    let mut report_file = File::create(report_path)?;
+    let report_path = reports_dir.join("evaluation_report.md");
+    let mut report_file = File::create(&report_path)?;
     report_file.write_all(report_md.as_bytes())?;
-    println!("Saved evaluation report to: {}", report_path);
+    println!("Saved evaluation report to: {}", report_path.display());
 
-    // Also write to the artifacts directory so the user gets it
-    let artifact_dir = std::env::var("RAG_EVAL_ARTIFACT_DIR")
-        .unwrap_or_else(|_| "src-tauri".to_string());
-    let artifact_report_path = Path::new(&artifact_dir).join("evaluation_report.md");
-    let mut artifact_file = File::create(artifact_report_path)?;
-    artifact_file.write_all(report_md.as_bytes())?;
-    println!("Saved evaluation report to artifacts directory.");
+    // If an explicit artifact dir override is set, also write there.
+    if let Ok(artifact_dir) = std::env::var("RAG_EVAL_ARTIFACT_DIR") {
+        let artifact_report_path = Path::new(&artifact_dir).join("evaluation_report.md");
+        if let Ok(mut artifact_file) = File::create(&artifact_report_path) {
+            let _ = artifact_file.write_all(report_md.as_bytes());
+            println!("Also saved evaluation report to: {}", artifact_report_path.display());
+        }
+    }
 
     println!("\nEvaluation run completed.");
     Ok(())

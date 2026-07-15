@@ -18,8 +18,14 @@ src-tauri/.cargo
 src-tauri/.env
 tmp
 *.db
+*.db-shm
+*.db-wal
 assistant.db
 T_AI_Personal_Assistant_MVP.pdf
 scratch/
 stitch_omni_workspace_os/
 *.sqbpro
+# App data directory (SQLite database lives here, not in src-tauri/)
+data/
+# Generated evaluation reports
+reports/
