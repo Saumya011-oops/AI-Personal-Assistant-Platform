@@ -6,6 +6,163 @@
 use std::collections::HashSet;
 use crate::domain::{ChunkSearchDocument, QueryAnalysis};
 
+
+#[derive(Debug, Clone)]
+pub struct WeightedExpansion {
+    pub primary: String,
+    pub secondary: Vec<String>,
+    pub context: Vec<String>,
+}
+
+impl WeightedExpansion {
+    pub fn to_expanded_query(&self) -> String {
+        let mut parts = Vec::new();
+        parts.push(self.primary.clone());
+        
+        // Repeat secondary terms twice (weight 0.5)
+        for term in &self.secondary {
+            parts.push(term.clone());
+            parts.push(term.clone());
+        }
+        
+        // Repeat context terms once (weight 0.2)
+        for term in &self.context {
+            parts.push(term.clone());
+        }
+        
+        parts.join(" ")
+    }
+}
+
+fn tokenize(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn is_stopword(word: &str) -> bool {
+    let stopwords = [
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "about", 
+        "explain", "how", "what", "is", "are", "tell", "me", "of", "this", "that", "these", 
+        "those", "my", "your", "his", "her", "their", "our", "it", "its", "we", "they", "you",
+        "i", "he", "she", "who", "whom", "which", "whose", "why", "where", "when", "how",
+        "compare", "between", "difference", "vs", "versus", "integration", "integrations"
+    ];
+    stopwords.contains(&word.to_lowercase().as_str())
+}
+
+fn is_sufficiently_specific(query: &str) -> bool {
+    let tokens = tokenize(query);
+    let non_stop: Vec<_> = tokens.iter()
+        .filter(|t| !is_stopword(t))
+        .collect();
+    non_stop.len() >= 6
+}
+
+fn token_equals(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    // Handle basic plurals: remove trailing 's' if token length > 2
+    let stem_a = if a.ends_with('s') && a.len() > 2 { &a[..a.len() - 1] } else { a };
+    let stem_b = if b.ends_with('s') && b.len() > 2 { &b[..b.len() - 1] } else { b };
+    stem_a == stem_b
+}
+
+/// Checks if term_lower matches query_lower with strict token boundaries.
+/// Supports multi-word phrases (contiguous token window matching).
+pub fn is_token_match(query_lower: &str, term_lower: &str) -> bool {
+    let query_tokens: Vec<&str> = query_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let term_tokens: Vec<&str> = term_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if term_tokens.is_empty() {
+        return false;
+    }
+
+    query_tokens.windows(term_tokens.len()).any(|window| {
+        window.iter().zip(term_tokens.iter()).all(|(q_tok, t_tok)| {
+            token_equals(q_tok, t_tok)
+        })
+    })
+}
+
+/// Counts how many times term_lower appears in query_lower with strict token boundaries.
+pub fn count_token_occurrences(query_lower: &str, term_lower: &str) -> usize {
+    let query_tokens: Vec<&str> = query_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let term_tokens: Vec<&str> = term_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if term_tokens.is_empty() {
+        return 0;
+    }
+
+    query_tokens.windows(term_tokens.len())
+        .filter(|window| {
+            window.iter().zip(term_tokens.iter()).all(|(q_tok, t_tok)| {
+                token_equals(q_tok, t_tok)
+            })
+        })
+        .count()
+}
+
+pub static RECOGNIZED_PHRASES: &[&str] = &[
+    "rust ownership",
+    "react hooks",
+    "dependency injection",
+    "prompt engineering",
+    "vector database",
+    "write ahead log",
+    "sqlite wal",
+    "desktop architecture",
+    "decentralized identifier",
+    "verifiable credential",
+    "differential privacy",
+    "gaussian mean",
+    "jwt authentication",
+    "token management",
+    "sso integration",
+    "hybrid search",
+    "recursive retrieval",
+    "contextual retrieval",
+    "threat modeling",
+    "performance optimization",
+    "cash flow",
+    "annual budget",
+    "expense reimbursement",
+    "remote work",
+    "employee handbook",
+];
+
+/// Detects if any recognized technical phrase is present in the query.
+pub fn detect_recognized_phrase(query: &str) -> Option<String> {
+    let query_lower = query.to_lowercase();
+    for &phrase in RECOGNIZED_PHRASES {
+        if is_token_match(&query_lower, phrase) {
+            return Some(phrase.to_string());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct EntityMatch {
     pub group_name: String,
@@ -182,6 +339,12 @@ impl EntityDictionary {
                 .collect()
         };
 
+        let static_names: HashSet<String> = groups.iter().map(|g| g.name.clone()).collect();
+        let generic_names: HashSet<&str> = [
+            "setup", "integration", "integrations", "guide", "flow", "overview",
+            "details", "process", "sync", "pipeline", "notion", "obsidian"
+        ].iter().cloned().collect();
+
         // For each document, perform metadata-aware extraction of entities
         for doc in documents {
             let mut doc_entities = clean_terms(&doc.title);
@@ -227,63 +390,83 @@ impl EntityDictionary {
             doc_entities.sort();
             doc_entities.dedup();
 
-            let mut matched_any_group = false;
-            for group in &mut groups {
-                if group.name == "notion" || group.name == "obsidian" {
-                    continue;
-                }
+            // Extract tags that can create/enrich dynamic groups
+            let valid_tags: Vec<String> = doc.tags.iter()
+                .map(|t| t.to_lowercase())
+                .filter(|t| !static_names.contains(t) && !generic_names.contains(t.as_str()) && is_valid_entity_term(t))
+                .collect();
 
-                let matches_group = group.name == doc.title.to_lowercase()
-                    || group.primary_terms.iter().any(|t| doc_entities.contains(t) || doc.title.to_lowercase().contains(t));
-
-                if matches_group {
-                    matched_any_group = true;
-                    // Enrich existing group
-                    let generic_terms = ["setup", "integration", "integrations", "guide", "flow", "overview", "details", "process", "sync", "pipeline"];
-                    for entity in &doc_entities {
-                        if entity == "notion" || entity == "obsidian" {
-                            continue;
-                        }
-                        if !group.primary_terms.contains(entity) && !group.specific_terms.contains(entity) {
-                            if !generic_terms.contains(&entity.as_str()) {
-                                group.specific_terms.push(entity.clone());
+            if !valid_tags.is_empty() {
+                for tag in &valid_tags {
+                    // Check if dynamic group already exists
+                    if let Some(pos) = groups.iter().position(|g| &g.name == tag) {
+                        // Enrich only if it is a dynamic group (not static)
+                        if !static_names.contains(tag) {
+                            let group = &mut groups[pos];
+                            for entity in &doc_entities {
+                                if static_names.contains(entity) || generic_names.contains(entity.as_str()) {
+                                    continue;
+                                }
+                                if !group.primary_terms.contains(entity) && !group.specific_terms.contains(entity) {
+                                    group.specific_terms.push(entity.clone());
+                                }
+                                if !group.expansion_terms.contains(entity) {
+                                    group.expansion_terms.push(entity.clone());
+                                }
                             }
                         }
-                        if !group.expansion_terms.contains(entity) {
-                            group.expansion_terms.push(entity.clone());
-                        }
-                    }
-                }
-            }
-
-            // If it didn't match any existing static group, build a new group dynamically
-            if !matched_any_group && !doc_entities.is_empty() {
-                // Reject generic terms from becoming group names
-                let generic_names = ["setup", "integration", "integrations", "guide", "flow", "overview", "details", "process", "sync", "pipeline"];
-                let group_name_opt = doc.tags.first()
-                    .map(|t| t.to_lowercase())
-                    .filter(|t| !generic_names.contains(&t.as_str()) && is_valid_entity_term(t))
-                    .or_else(|| {
-                        doc_entities.iter()
-                            .find(|t| !generic_names.contains(&t.as_str()))
-                            .cloned()
-                    });
-
-                if let Some(group_name) = group_name_opt {
-                    if !groups.iter().any(|g| g.name == group_name) {
-                        let primary_terms = vec![group_name.clone()];
+                    } else {
+                        // Create a new dynamic group
+                        let primary_terms = vec![tag.clone()];
                         let mut specific_terms = Vec::new();
-                        let mut expansion_terms = doc_entities.clone();
+                        let mut expansion_terms = vec![tag.clone()];
 
                         for entity in &doc_entities {
-                            if entity != &group_name && !generic_names.contains(&entity.as_str()) {
+                            if entity != tag && !static_names.contains(entity) && !generic_names.contains(entity.as_str()) {
                                 specific_terms.push(entity.clone());
+                                expansion_terms.push(entity.clone());
                             }
                         }
 
-                        for t in &primary_terms {
-                            if !expansion_terms.contains(t) {
-                                expansion_terms.push(t.clone());
+                        groups.push(EntityGroup {
+                            name: tag.clone(),
+                            primary_terms,
+                            specific_terms,
+                            expansion_terms,
+                        });
+                    }
+                }
+            } else if !doc_entities.is_empty() {
+                // If the document has no valid tags but has doc_entities, try to find a candidate entity
+                let group_name_opt = doc_entities.iter()
+                    .find(|t| !static_names.contains(*t) && !generic_names.contains(t.as_str()))
+                    .cloned();
+
+                if let Some(group_name) = group_name_opt {
+                    if let Some(pos) = groups.iter().position(|g| g.name == group_name) {
+                        if !static_names.contains(&group_name) {
+                            let group = &mut groups[pos];
+                            for entity in &doc_entities {
+                                if static_names.contains(entity) || generic_names.contains(entity.as_str()) {
+                                    continue;
+                                }
+                                if !group.primary_terms.contains(entity) && !group.specific_terms.contains(entity) {
+                                    group.specific_terms.push(entity.clone());
+                                }
+                                if !group.expansion_terms.contains(entity) {
+                                    group.expansion_terms.push(entity.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        let primary_terms = vec![group_name.clone()];
+                        let mut specific_terms = Vec::new();
+                        let mut expansion_terms = vec![group_name.clone()];
+
+                        for entity in &doc_entities {
+                            if entity != &group_name && !static_names.contains(entity) && !generic_names.contains(entity.as_str()) {
+                                specific_terms.push(entity.clone());
+                                expansion_terms.push(entity.clone());
                             }
                         }
 
@@ -305,50 +488,117 @@ impl EntityDictionary {
         let query_lower = query.to_lowercase();
         let mut score = 0;
         let name_lower = group.name.to_lowercase();
-        if query_lower.contains(&name_lower) {
+        if is_token_match(&query_lower, &name_lower) {
             score += 10;
         }
         for t in &group.primary_terms {
-            if query_lower.contains(&t.to_lowercase()) {
+            if is_token_match(&query_lower, &t.to_lowercase()) {
                 score += 5;
             }
         }
         for t in &group.specific_terms {
-            if query_lower.contains(&t.to_lowercase()) {
+            if is_token_match(&query_lower, &t.to_lowercase()) {
                 score += 3;
             }
         }
         for t in &group.expansion_terms {
-            if query_lower.contains(&t.to_lowercase()) {
+            if is_token_match(&query_lower, &t.to_lowercase()) {
                 score += 1;
             }
         }
         score
     }
 
-    /// Returns all expansion terms for the query (union across all matched groups).
+    /// Returns all expansion terms for the query (union across all matched groups) using weighted logic.
     pub fn expand(&self, query: &str) -> (String, Vec<String>) {
-        let mut expansions: Vec<String> = Vec::new();
-        let mut matched_groups: Vec<String> = Vec::new();
+        if std::env::var("USE_OLD_EXPANSION").is_ok() {
+            let mut expansions: Vec<String> = Vec::new();
+            let mut matched_groups: Vec<String> = Vec::new();
+            for group in &self.groups {
+                let score = self.score_group_for_query(group, query);
+                if score >= 3 {
+                    matched_groups.push(group.name.clone());
+                    for term in &group.expansion_terms {
+                        if !expansions.contains(term) {
+                            expansions.push(term.clone());
+                        }
+                    }
+                }
+            }
+            let expanded = if expansions.is_empty() {
+                query.to_string()
+            } else {
+                format!("{} {}", query, expansions.join(" "))
+            };
+            return (expanded, matched_groups);
+        }
 
+        let query_lower = query.to_lowercase();
+        
+        // If the query is already sufficiently specific, avoid expansion entirely
+        if is_sufficiently_specific(query) {
+            tracing::info!("[EXPANSION] Query '{}' is already sufficiently specific. Skipping expansion.", query);
+            return (query.to_string(), Vec::new());
+        }
+        
+        let mut matched_groups: Vec<String> = Vec::new();
+        let mut secondary_terms: Vec<String> = Vec::new();
+        let mut context_terms: Vec<String> = Vec::new();
+        
         for group in &self.groups {
             let score = self.score_group_for_query(group, query);
-            if score >= 3 {
+            let has_specific_match = group.specific_terms.iter().any(|t| is_token_match(&query_lower, &t.to_lowercase()));
+            // Only expand when the detected concept has high confidence (score >= 5 or has direct specific term match)
+            if score >= 5 || has_specific_match {
                 matched_groups.push(group.name.clone());
-                for term in &group.expansion_terms {
-                    if !expansions.contains(term) {
-                        expansions.push(term.clone());
+                
+                // Context term: the group name itself
+                if !context_terms.contains(&group.name) {
+                    context_terms.push(group.name.clone());
+                }
+                
+                // Secondary terms: specific terms that are not in the query
+                for term in &group.specific_terms {
+                    let term_lower = term.to_lowercase();
+                    if !is_token_match(&query_lower, &term_lower) && !secondary_terms.contains(term) {
+                        secondary_terms.push(term.clone());
+                    }
+                }
+                
+                // If specific_terms didn't yield terms, pull from primary_terms
+                if secondary_terms.is_empty() {
+                    for term in &group.primary_terms {
+                        let term_lower = term.to_lowercase();
+                        if !is_token_match(&query_lower, &term_lower) && !secondary_terms.contains(term) {
+                            secondary_terms.push(term.clone());
+                        }
                     }
                 }
             }
         }
-
-        let expanded = if expansions.is_empty() {
-            query.to_string()
+        
+        // Restrict to max 2 secondary terms and max 1 context term
+        secondary_terms.truncate(2);
+        context_terms.truncate(1);
+        
+        let detected_phrase = crate::services::entity_dictionary::detect_recognized_phrase(query);
+        let primary = if let Some(ref phrase) = detected_phrase {
+            // Keep original query + detected phrase
+            format!("{} {}", query, phrase)
         } else {
-            format!("{} {}", query, expansions.join(" "))
+            query.to_string()
         };
-
+        
+        let expansion = WeightedExpansion {
+            primary,
+            secondary: secondary_terms,
+            context: context_terms,
+        };
+        
+        let expanded = expansion.to_expanded_query();
+        if !expanded.is_empty() && expanded != query {
+            tracing::info!("[EXPANSION] Expanded query: '{}' -> '{}'", query, expanded);
+        }
         (expanded, matched_groups)
     }
 
@@ -362,7 +612,7 @@ impl EntityDictionary {
             }
             for group in &self.groups {
                 let matches_primary = group.name == subject_lower
-                    || group.primary_terms.iter().any(|t| t == &subject_lower || subject_lower.contains(t))
+                    || group.primary_terms.iter().any(|t| t == &subject_lower || is_token_match(&subject_lower, &t.to_lowercase()))
                     || group.specific_terms.iter().any(|t| t == &subject_lower);
                 if matches_primary {
                     matches.push(group.name.clone());
@@ -421,7 +671,7 @@ impl EntityDictionary {
     pub fn is_specific_entity_query(&self, query: &str) -> bool {
         let lower = query.to_lowercase();
         self.groups.iter().any(|g| {
-            g.specific_terms.iter().any(|t| lower.contains(t))
+            g.specific_terms.iter().any(|t| is_token_match(&lower, &t.to_lowercase()))
         })
     }
 
@@ -493,13 +743,13 @@ impl EntityDictionary {
             let mut score = 0;
             let group_name_lower = group.name.to_lowercase();
 
-            if query_lower.contains(&group_name_lower) {
+            if is_token_match(&query_lower, &group_name_lower) {
                 score += 10;
             }
 
             let mut matched_primary = false;
             for t in &group.primary_terms {
-                if query_lower.contains(&t.to_lowercase()) {
+                if is_token_match(&query_lower, &t.to_lowercase()) {
                     matched_primary = true;
                     break;
                 }
@@ -510,7 +760,7 @@ impl EntityDictionary {
 
             let mut matched_specific = false;
             for t in &group.specific_terms {
-                if query_lower.contains(&t.to_lowercase()) {
+                if is_token_match(&query_lower, &t.to_lowercase()) {
                     matched_specific = true;
                     break;
                 }
@@ -521,7 +771,7 @@ impl EntityDictionary {
 
             let mut expansion_matches = 0;
             for t in &group.expansion_terms {
-                if query_lower.contains(&t.to_lowercase()) {
+                if is_token_match(&query_lower, &t.to_lowercase()) {
                     expansion_matches += 1;
                 }
             }
@@ -543,10 +793,10 @@ impl EntityDictionary {
             let mut match_count = 0;
             let mut total_occurrences = 0;
             for term in &all_group_terms {
-                let term_matches = query_lower.matches(term).count();
-                if term_matches > 0 {
+                let occurrences = count_token_occurrences(&query_lower, term);
+                if occurrences > 0 {
                     match_count += 1;
-                    total_occurrences += term_matches;
+                    total_occurrences += occurrences;
                 }
             }
             if match_count >= 2 || total_occurrences >= 2 {
@@ -555,18 +805,18 @@ impl EntityDictionary {
 
             let mut in_noun_phrases = false;
             for phrase in &noun_phrases {
-                if phrase.contains(&group_name_lower) {
+                if is_token_match(phrase, &group_name_lower) {
                     in_noun_phrases = true;
                     break;
                 }
                 for t in &group.primary_terms {
-                    if phrase.contains(&t.to_lowercase()) {
+                    if is_token_match(phrase, &t.to_lowercase()) {
                         in_noun_phrases = true;
                         break;
                     }
                 }
                 for t in &group.specific_terms {
-                    if phrase.contains(&t.to_lowercase()) {
+                    if is_token_match(phrase, &t.to_lowercase()) {
                         in_noun_phrases = true;
                         break;
                     }

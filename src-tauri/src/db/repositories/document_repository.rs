@@ -442,7 +442,15 @@ impl DocumentRepository {
                 chunk_metadata_json,
             })
         })?;
-        Ok(rows.filter_map(Result::ok).collect())
+        Ok(rows
+            .filter_map(|r| match r {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    tracing::warn!("[DB] list_all_chunk_search_documents: skipped row due to error: {}", e);
+                    None
+                }
+            })
+            .collect())
     }
 
     pub fn search_chunks_bm25(

@@ -19,8 +19,7 @@ pub fn rank_memories(
 
     let now = Utc::now();
 
-    // 1. Calculate raw features
-    let raw_features: Vec<(DbMemory, f64, f64, f64, f64)> = candidates
+    let mut ranked: Vec<RankedMemory> = candidates
         .into_iter()
         .map(|(mem, sim)| {
             let similarity = sim as f64;
@@ -36,58 +35,11 @@ pub fn rank_memories(
 
             let access_count = mem.access_count as f64;
 
-            (mem, similarity, importance, recency, access_count)
-        })
-        .collect();
-
-    // 2. Perform Min-Max Normalization over the candidate pool
-
-    let mut sim_min = f64::MAX; let mut sim_max = f64::MIN;
-    let mut imp_min = f64::MAX; let mut imp_max = f64::MIN;
-    let mut rec_min = f64::MAX; let mut rec_max = f64::MIN;
-    let mut acc_min = f64::MAX; let mut acc_max = f64::MIN;
-
-    for (_, sim, imp, rec, acc) in &raw_features {
-        if *sim < sim_min { sim_min = *sim; }
-        if *sim > sim_max { sim_max = *sim; }
-        if *imp < imp_min { imp_min = *imp; }
-        if *imp > imp_max { imp_max = *imp; }
-        if *rec < rec_min { rec_min = *rec; }
-        if *rec > rec_max { rec_max = *rec; }
-        if *acc < acc_min { acc_min = *acc; }
-        if *acc > acc_max { acc_max = *acc; }
-    }
-
-    // EPSILON to prevent division by zero
-    let eps = 1e-6;
-
-    let mut ranked: Vec<RankedMemory> = raw_features
-        .into_iter()
-        .map(|(mem, sim, imp, rec, acc)| {
-            // Min-Max normalization with fallbacks if max == min
-            let norm_sim = if (sim_max - sim_min).abs() < eps {
-                sim // Fallback to absolute similarity
-            } else {
-                (sim - sim_min) / (sim_max - sim_min)
-            };
-
-            let norm_imp = if (imp_max - imp_min).abs() < eps {
-                imp / 10.0 // Fallback to absolute scale 1-10
-            } else {
-                (imp - imp_min) / (imp_max - imp_min)
-            };
-
-            let norm_rec = if (rec_max - rec_min).abs() < eps {
-                rec // Fallback to absolute exp decay
-            } else {
-                (rec - rec_min) / (rec_max - rec_min)
-            };
-
-            let norm_acc = if (acc_max - acc_min).abs() < eps {
-                (acc / 20.0).min(1.0) // Fallback to cap at 20 accesses
-            } else {
-                (acc - acc_min) / (acc_max - acc_min)
-            };
+            // Fixed/stable normalization independent of the candidate pool size or values
+            let norm_sim = similarity; 
+            let norm_imp = importance / 10.0; 
+            let norm_rec = recency; 
+            let norm_acc = (access_count / 10.0).min(1.0); 
 
             // Weights: 0.55 Similarity, 0.20 Importance, 0.15 Recency, 0.10 Access Frequency
             let final_score = 0.55 * norm_sim + 0.20 * norm_imp + 0.15 * norm_rec + 0.10 * norm_acc;

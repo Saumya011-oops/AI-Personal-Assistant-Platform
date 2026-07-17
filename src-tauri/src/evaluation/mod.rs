@@ -17,9 +17,12 @@ pub mod regression;
 pub mod reporter;
 pub mod types;
 
+#[cfg(test)]
+pub mod tests;
+
 // Re-export the most commonly used types at the module root for ergonomics.
 pub use types::{
-    AnswerCharacteristic, BaselineEntry, ClaimSupport, ClaimVerification, DimensionScore,
+    AnswerCharacteristic, Baseline, BaselineEntry, ClaimSupport, ClaimVerification, DimensionScore,
     EvalResult, EvalScorecard, ExecutionTrace, FailureRootCause, FixProposal, GroundTruth,
     LatencyBreakdown, MemoryFixture, RankedMemorySnapshot, RunReport, TestCase, TestCategory,
     TestConstraints, TestSuite,

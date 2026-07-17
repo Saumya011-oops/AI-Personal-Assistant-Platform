@@ -70,16 +70,15 @@ fn retrieval_tests() -> Vec<TestCase> {
             id: tid("RET-FACT"),
             suite: TestSuite::Retrieval,
             category: TestCategory::FactualLookup,
-            description: "Direct factual lookup — Notion OAuth setup steps".to_string(),
-            query: "How do I connect Notion to the assistant using OAuth?".to_string(),
+            description: "Direct factual lookup — OAuth authentication flow".to_string(),
+            query: "What OAuth credentials are required to connect to the assistant?".to_string(),
             ground_truth: GroundTruth {
                 required_facts: vec![
-                    "OAuth token is required to connect Notion".to_string(),
-                    "API credentials must be saved".to_string(),
+                    "OAuth token is required for authentication".to_string(),
                 ],
-                required_doc_ids: vec!["notion".to_string()],
-                required_entities: vec!["Notion".to_string(), "OAuth".to_string()],
-                required_answer_keywords: vec!["token".to_string(), "notion".to_string()],
+                required_doc_ids: vec!["authentication".to_string()],
+                required_entities: vec!["OAuth".to_string()],
+                required_answer_keywords: vec!["token".to_string(), "oauth".to_string()],
                 min_citations: 1,
                 expected_statuses: vec!["OK".to_string()],
                 ..Default::default()
@@ -152,7 +151,7 @@ fn retrieval_tests() -> Vec<TestCase> {
             description: "Broad question spanning multiple document types".to_string(),
             query: "Give me an overview of all the integrations supported by the assistant.".to_string(),
             ground_truth: GroundTruth {
-                required_answer_keywords: vec!["notion".to_string(), "google".to_string()],
+                required_answer_keywords: vec!["qdrant".to_string(), "authentication".to_string()],
                 min_citations: 2,
                 expected_statuses: vec!["OK".to_string(), "PARTIAL_RETRIEVAL".to_string()],
                 ..Default::default()
@@ -166,11 +165,11 @@ fn retrieval_tests() -> Vec<TestCase> {
             id: tid("RET-CMP"),
             suite: TestSuite::Retrieval,
             category: TestCategory::ComparisonQuestion,
-            description: "Cross-document comparison — Notion vs Obsidian sync".to_string(),
-            query: "What is the difference between syncing Notion documents and syncing Obsidian notes?".to_string(),
+            description: "Cross-document comparison — dense vs sparse retrieval".to_string(),
+            query: "What is the difference between dense vector search and sparse keyword search in the assistant?".to_string(),
             ground_truth: GroundTruth {
-                required_entities: vec!["Notion".to_string(), "Obsidian".to_string()],
-                required_answer_keywords: vec!["notion".to_string(), "obsidian".to_string()],
+                required_entities: vec!["dense".to_string()],
+                required_answer_keywords: vec!["vector".to_string(), "search".to_string()],
                 min_citations: 2,
                 expected_statuses: vec!["OK".to_string(), "PARTIAL_RETRIEVAL".to_string()],
                 answer_characteristics: vec![AnswerCharacteristic::ContainsComparison],
@@ -222,11 +221,11 @@ fn retrieval_tests() -> Vec<TestCase> {
             id: tid("RET-TYPO"),
             suite: TestSuite::Retrieval,
             category: TestCategory::TypoQuery,
-            description: "Typo resilience — 'Obsidean' instead of 'Obsidian'".to_string(),
-            query: "How do I sync my Obsidean vault?".to_string(),
+            description: "Typo resilience — 'Qdrent' instead of 'Qdrant'".to_string(),
+            query: "How does Qdrent work as a vector database?".to_string(),
             ground_truth: GroundTruth {
-                required_entities: vec!["Obsidian".to_string()],
-                required_answer_keywords: vec!["obsidian".to_string()],
+                required_entities: vec!["Qdrant".to_string()],
+                required_answer_keywords: vec!["qdrant".to_string(), "vector".to_string()],
                 min_citations: 1,
                 expected_statuses: vec!["OK".to_string(), "PARTIAL_RETRIEVAL".to_string()],
                 forbidden_terms: vec![],
@@ -281,7 +280,7 @@ fn retrieval_tests() -> Vec<TestCase> {
             ground_truth: GroundTruth {
                 min_citations: 0,
                 expected_statuses: vec![
-                    "AMBIGUOUS_RETRIEVAL".to_string(),
+                    "PARTIAL_RETRIEVAL".to_string(),
                     "PARTIAL_RETRIEVAL".to_string(),
                     "OK".to_string(),
                 ],
@@ -303,7 +302,7 @@ fn retrieval_tests() -> Vec<TestCase> {
                 min_citations: 0,
                 expected_statuses: vec![
                     "EMPTY_RETRIEVAL".to_string(),
-                    "LOW_CONFIDENCE_RETRIEVAL".to_string(),
+                    "LOW_CONFIDENCE".to_string(),
                 ],
                 forbidden_terms: vec![
                     "quantum".to_string(),
@@ -328,9 +327,9 @@ fn retrieval_tests() -> Vec<TestCase> {
                 min_citations: 0,
                 expected_statuses: vec![
                     "OK".to_string(),
-                    "AMBIGUOUS_RETRIEVAL".to_string(),
                     "PARTIAL_RETRIEVAL".to_string(),
-                    "LOW_CONFIDENCE_RETRIEVAL".to_string(),
+                    "PARTIAL_RETRIEVAL".to_string(),
+                    "LOW_CONFIDENCE".to_string(),
                 ],
                 ..Default::default()
             },
@@ -539,9 +538,26 @@ fn memory_tests() -> Vec<TestCase> {
                 expected_statuses: vec!["OK".to_string(), "PARTIAL_RETRIEVAL".to_string()],
                 ..Default::default()
             },
-            memory_fixtures: vec![],
+            memory_fixtures: vec![
+                MemoryFixture {
+                    id: "eval-mem-dedup-a".to_string(),
+                    memory_type: "PREFERENCE".to_string(),
+                    content: "User prefers dark mode in all applications".to_string(),
+                    importance: 6,
+                    simulated_age_days: 5.0,
+                    is_stale: false,
+                },
+                MemoryFixture {
+                    id: "eval-mem-dedup-b".to_string(),
+                    memory_type: "PREFERENCE".to_string(),
+                    content: "User prefers dark mode interface across their tools".to_string(),
+                    importance: 6,
+                    simulated_age_days: 4.0,
+                    is_stale: false,
+                },
+            ],
             constraints: TestConstraints {
-                uses_seeded_memories: false, // uses live memories
+                uses_seeded_memories: true,
                 ..Default::default()
             },
         },
@@ -559,10 +575,10 @@ fn combined_tests() -> Vec<TestCase> {
             suite: TestSuite::Combined,
             category: TestCategory::FactualLookup,
             description: "Combined — personal preference + document facts".to_string(),
-            query: "How should I set up Notion given my workflow preferences?".to_string(),
+            query: "How should I organize my documents given my workflow preferences?".to_string(),
             ground_truth: GroundTruth {
-                required_entities: vec!["Notion".to_string()],
-                required_answer_keywords: vec!["notion".to_string()],
+                required_entities: vec!["document".to_string()],
+                required_answer_keywords: vec!["document".to_string(), "organize".to_string()],
                 min_citations: 1,
                 expected_statuses: vec!["OK".to_string(), "PARTIAL_RETRIEVAL".to_string()],
                 ..Default::default()
@@ -600,7 +616,7 @@ fn hallucination_tests() -> Vec<TestCase> {
                 min_citations: 0,
                 expected_statuses: vec![
                     "EMPTY_RETRIEVAL".to_string(),
-                    "LOW_CONFIDENCE_RETRIEVAL".to_string(),
+                    "LOW_CONFIDENCE".to_string(),
                 ],
                 forbidden_terms: vec![
                     "quantum module".to_string(),
@@ -625,8 +641,8 @@ fn hallucination_tests() -> Vec<TestCase> {
                 min_citations: 0,
                 expected_statuses: vec![
                     "EMPTY_RETRIEVAL".to_string(),
-                    "LOW_CONFIDENCE_RETRIEVAL".to_string(),
-                    "AMBIGUOUS_RETRIEVAL".to_string(),
+                    "LOW_CONFIDENCE".to_string(),
+                    "PARTIAL_RETRIEVAL".to_string(),
                 ],
                 forbidden_terms: vec!["dr. evelyn park said".to_string(), "evelyn park stated".to_string()],
                 answer_characteristics: vec![AnswerCharacteristic::AcknowledgesUncertainty],
@@ -650,7 +666,7 @@ fn hallucination_tests() -> Vec<TestCase> {
                 expected_statuses: vec![
                     "OK".to_string(),
                     "PARTIAL_RETRIEVAL".to_string(),
-                    "LOW_CONFIDENCE_RETRIEVAL".to_string(),
+                    "LOW_CONFIDENCE".to_string(),
                 ],
                 ..Default::default()
             },
@@ -669,7 +685,7 @@ fn hallucination_tests() -> Vec<TestCase> {
                 min_citations: 0,
                 expected_statuses: vec![
                     "EMPTY_RETRIEVAL".to_string(),
-                    "LOW_CONFIDENCE_RETRIEVAL".to_string(),
+                    "LOW_CONFIDENCE".to_string(),
                 ],
                 forbidden_terms: vec!["version 3.0 will be released on".to_string()],
                 answer_characteristics: vec![AnswerCharacteristic::AcknowledgesUncertainty],

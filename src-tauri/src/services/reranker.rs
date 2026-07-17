@@ -92,6 +92,7 @@ impl RerankerService {
         for chunk in &mut chunks {
             if let Some(score) = ranked_map.get(&chunk.chunk_id) {
                 chunk.score = *score;
+                chunk.reranker_score = Some(*score);
             }
         }
 

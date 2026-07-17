@@ -1,0 +1,1 @@
+{"conversationId":"a5d3ddc5-7e3a-49be-9ebf-1f8d607ce840","expectedResponse":"Recall should contain: [\"Felix\", \"Kubernetes controller\"]","failureCategory":"Memory Recall","query":"Hello! Today is sunny. My name is Felix. I had coffee this morning. I am building a Kubernetes controller."}

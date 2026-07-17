@@ -41,9 +41,10 @@ impl OllamaService {
         }
 
         let url = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
+        let inputs_lower: Vec<String> = inputs.iter().map(|s| s.to_lowercase()).collect();
         let request_payload = EmbedRequest {
             model: self.model.clone(),
-            input: inputs.to_vec(),
+            input: inputs_lower,
         };
 
         let response = self

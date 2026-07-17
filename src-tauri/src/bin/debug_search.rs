@@ -15,10 +15,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let config = AppConfig::load().context("Failed to load AppConfig")?;
     let database = Database::connect(&config.database_path).context("Failed to connect to database")?;
+    database.run_migrations().context("Failed to run database migrations")?;
     
     let ollama_service = OllamaService::new(config.ollama_url.clone(), config.embedding_model.clone());
     let qdrant_service = QdrantService::new(config.qdrant_url.clone(), config.qdrant_collection.clone());
-    let sparse_service = SparseRetrievalService::new(config.sparse_helper_port, config.sparse_helper_script_path(), config.node_binary.clone());
+    // Use a dedicated port for debug_search to avoid contention with the running Tauri app
+    let sparse_service = SparseRetrievalService::new(8744, config.sparse_helper_script_path(), config.node_binary.clone());
     let cred_service = std::sync::Arc::new(assistant_core::services::CredentialService::new_no_handle().context("Failed to create credential service")?);
     let groq_service = GroqService::new(config.groq_api_key.clone(), Some(database.clone()), Some(cred_service), config.groq_base_url.clone(), config.groq_model_primary.clone(), config.groq_model_fallback.clone());
     let query_analyzer_service = QueryAnalyzerService::new(groq_service.clone());

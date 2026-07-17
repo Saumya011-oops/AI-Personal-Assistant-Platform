@@ -67,6 +67,26 @@ impl Evaluator {
         Self { ollama, groq }
     }
 
+    /// Construct an Evaluator with no-op service URLs for unit testing.
+    /// The pure scoring methods do not call Ollama or Groq.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self::new(
+            OllamaService::new(
+                "http://localhost:11434".to_string(),
+                "nomic-embed-text".to_string(),
+            ),
+            GroqService::new(
+                None,
+                None,
+                None,
+                "http://localhost".to_string(),
+                "llama3-8b-8192".to_string(),
+                "llama3-8b-8192".to_string(),
+            ),
+        )
+    }
+
     /// Main entry point — evaluates a trace against its test case's ground truth.
     pub async fn evaluate(&self, test: &TestCase, trace: &ExecutionTrace) -> EvalResult {
         // If the pipeline itself errored, short-circuit with an error result.
@@ -136,7 +156,7 @@ impl Evaluator {
 
     // ── Dimension 1: Retrieval ────────────────────────────────────────────────
 
-    fn score_retrieval(&self, test: &TestCase, trace: &ExecutionTrace) -> DimensionScore {
+    pub(crate) fn score_retrieval(&self, test: &TestCase, trace: &ExecutionTrace) -> DimensionScore {
         let gt = &test.ground_truth;
         let mut score: f32 = 100.0;
         let mut details = Vec::new();
@@ -235,7 +255,7 @@ impl Evaluator {
 
     // ── Dimension 2: Memory ───────────────────────────────────────────────────
 
-    fn score_memory(&self, test: &TestCase, trace: &ExecutionTrace) -> DimensionScore {
+    pub(crate) fn score_memory(&self, test: &TestCase, trace: &ExecutionTrace) -> DimensionScore {
         let gt = &test.ground_truth;
         let mut score: f32 = 100.0;
         let mut details = Vec::new();
@@ -352,7 +372,7 @@ impl Evaluator {
 
     // ── Dimension 3: Prompt Assembly ──────────────────────────────────────────
 
-    fn score_prompt_assembly(&self, trace: &ExecutionTrace) -> DimensionScore {
+    pub(crate) fn score_prompt_assembly(&self, trace: &ExecutionTrace) -> DimensionScore {
         let mut score: f32 = 100.0;
         let mut details = Vec::new();
 
@@ -371,23 +391,28 @@ impl Evaluator {
             );
             score -= 5.0; // small deduction for observability gap
         } else {
-            // 3a. Section ordering
-            let section_positions: Vec<Option<usize>> = PROMPT_SECTION_ORDER
+            // Collect (section_name, byte_position) for every section found.
+            let present_sections: Vec<(&str, usize)> = PROMPT_SECTION_ORDER
                 .iter()
-                .map(|section| prompt.find(section))
+                .filter_map(|s| prompt.find(s).map(|pos| (*s, pos)))
                 .collect();
 
+            // Check all pairs (i, j) where i < j in canonical order.
+            // If section[i] appears at a later byte position than section[j],
+            // that is an ordering violation — catches non-adjacent inversions.
             let mut order_ok = true;
-            for i in 0..section_positions.len().saturating_sub(1) {
-                if let (Some(a), Some(b)) = (section_positions[i], section_positions[i + 1]) {
-                    if a > b {
+            'outer: for i in 0..present_sections.len() {
+                for j in (i + 1)..present_sections.len() {
+                    let (name_i, pos_i) = present_sections[i];
+                    let (name_j, pos_j) = present_sections[j];
+                    if pos_i > pos_j {
                         order_ok = false;
                         details.push(format!(
-                            "Prompt ordering violation: '{}' appears after '{}'",
-                            PROMPT_SECTION_ORDER[i],
-                            PROMPT_SECTION_ORDER[i + 1]
+                            "Prompt ordering violation: '{}' (pos {}) appears after '{}' (pos {})",
+                            name_i, pos_i, name_j, pos_j
                         ));
                         score -= 20.0;
+                        break 'outer;
                     }
                 }
             }
@@ -430,7 +455,7 @@ impl Evaluator {
 
     // ── Dimension 4: Answer Quality ───────────────────────────────────────────
 
-    fn score_answer_quality(&self, test: &TestCase, trace: &ExecutionTrace) -> DimensionScore {
+    pub(crate) fn score_answer_quality(&self, test: &TestCase, trace: &ExecutionTrace) -> DimensionScore {
         let gt = &test.ground_truth;
         let answer_lower = trace.final_answer.to_lowercase();
         let mut score: f32 = 100.0;
@@ -792,7 +817,7 @@ impl Evaluator {
 
     // ── Dimension 5: Hallucination Score ─────────────────────────────────────
 
-    fn score_hallucination(&self, claims: &[ClaimVerification]) -> DimensionScore {
+    pub(crate) fn score_hallucination(&self, claims: &[ClaimVerification]) -> DimensionScore {
         if claims.is_empty() {
             return DimensionScore::new(100.0, THRESHOLD_HALLUCINATION, vec!["No claims to verify".to_string()]);
         }
@@ -821,7 +846,7 @@ impl Evaluator {
 
     // ── Dimension 6: Citation Accuracy ────────────────────────────────────────
 
-    fn score_citations(&self, trace: &ExecutionTrace) -> DimensionScore {
+    pub(crate) fn score_citations(&self, trace: &ExecutionTrace) -> DimensionScore {
         if trace.citations.is_empty() {
             // If no citations required and none given, that's fine
             return DimensionScore::new(
@@ -864,7 +889,7 @@ impl Evaluator {
 
     // ── Dimension 7: Grounding Score ──────────────────────────────────────────
 
-    fn score_grounding(&self, claims: &[ClaimVerification]) -> DimensionScore {
+    pub(crate) fn score_grounding(&self, claims: &[ClaimVerification]) -> DimensionScore {
         if claims.is_empty() {
             return DimensionScore::new(
                 100.0,
@@ -1336,7 +1361,7 @@ fn semantic_grounding_check(
 // Utilities
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -1351,7 +1376,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Split answer text into individual factual sentences.
-fn tokenize_sentences(text: &str) -> Vec<String> {
+pub(crate) fn tokenize_sentences(text: &str) -> Vec<String> {
     // Simple sentence splitter — splits on '. ', '! ', '? ', '\n'
     let mut sentences = Vec::new();
     let mut current = String::new();

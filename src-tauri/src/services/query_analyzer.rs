@@ -17,29 +17,120 @@ impl QueryAnalyzerService {
         Self { groq_service }
     }
 
-    pub async fn analyze(&self, database: &crate::db::Database, query: &str) -> Result<QueryAnalysis> {
-        let groq_analysis = self.request_analysis(query).await?;
-        let mut analysis = self.strict_analysis(query, &groq_analysis)?;
-
-        if let Some(tags) = &mut analysis.metadata_filters.tags {
-            if let Ok(db_tags) = database.document_repository().get_all_unique_tags() {
-                tags.retain(|t| db_tags.contains(&t.to_lowercase()));
-            }
-        }
-        if analysis.metadata_filters.tags.as_ref().is_some_and(|t| t.is_empty()) {
-            analysis.metadata_filters.tags = None;
+    pub fn classify_level(&self, query: &str) -> crate::domain::AnalysisLevel {
+        let normalized = query.to_lowercase();
+        
+        let greeting_keywords = ["hello", "hi", "hey", "thanks", "thank you", "good morning", "good afternoon"];
+        let memory_keywords = ["my name is", "i am", "what is my", "what am i", "remember", "forget"];
+        if greeting_keywords.iter().any(|&k| normalized.contains(k))
+            || memory_keywords.iter().any(|&k| normalized.contains(k)) 
+        {
+            return crate::domain::AnalysisLevel::Level0;
         }
 
-        if let Some(cats) = &mut analysis.metadata_filters.category {
-            if let Ok(db_cats) = database.document_repository().get_all_unique_categories() {
-                cats.retain(|c| db_cats.contains(&c.to_lowercase()));
-            }
-        }
-        if analysis.metadata_filters.category.as_ref().is_some_and(|c| c.is_empty()) {
-            analysis.metadata_filters.category = None;
-        }
+        let has_source = normalized.contains("notion") || normalized.contains("obsidian") 
+            || normalized.contains("gmail") || normalized.contains("drive") || normalized.contains("calendar");
+        
+        let has_author = normalized.contains("by ") || normalized.contains("written by");
+        
+        let has_date = normalized.contains("since") || normalized.contains("after") 
+            || normalized.contains("before") || normalized.contains("until") 
+            || normalized.contains("last week") || normalized.contains("yesterday")
+            || normalized.contains("last month") || normalized.contains("between");
 
+        let has_complexity = normalized.contains("compare") || normalized.contains("vs") 
+            || normalized.contains("versus") || normalized.contains("difference") 
+            || normalized.contains("changed between") || normalized.contains("relationship")
+            || normalized.contains("connection") || normalized.contains("summarize all");
+
+        let has_doc_type = normalized.contains("policy") || normalized.contains("guidelines")
+            || normalized.contains("roadmap") || normalized.contains("sop") 
+            || normalized.contains("standard operating procedure") || normalized.contains("handbook")
+            || normalized.contains("guide");
+
+        if has_complexity {
+            crate::domain::AnalysisLevel::Level3
+        } else if has_source || has_author || has_date || has_doc_type {
+            crate::domain::AnalysisLevel::Level2
+        } else {
+            crate::domain::AnalysisLevel::Level1
+        }
+    }
+
+    fn analyze_local(&self, query: &str, level: crate::domain::AnalysisLevel, reason: Option<String>) -> QueryAnalysis {
+        let empty_json = serde_json::json!({
+            "intent": "search",
+            "entities": [],
+            "metadataFilters": {},
+            "temporal": false,
+            "complexity": "simple",
+            "strategy": "hybrid"
+        });
+        
+        let mut analysis = self.strict_analysis(query, &empty_json).unwrap();
+        analysis.level = level;
+        analysis.is_local = true;
+        analysis.bypass_reason = reason;
         analysis.strategy = self.select_strategy(query, &analysis);
+        analysis
+    }
+
+    pub async fn analyze(&self, database: &crate::db::Database, query: &str) -> Result<QueryAnalysis> {
+        let level = self.classify_level(query);
+
+        if level == crate::domain::AnalysisLevel::Level0 {
+            let analysis = self.analyze_local(query, level, Some("Level 0 chat/memory bypass".to_string()));
+            return Ok(analysis);
+        }
+
+        if level == crate::domain::AnalysisLevel::Level1 {
+            let analysis = self.analyze_local(query, level, Some("Level 1 technical/entity bypass".to_string()));
+            return Ok(analysis);
+        }
+
+        if self.groq_service.is_configured() {
+            match self.request_analysis(query).await {
+                Ok(groq_analysis) => {
+                    let mut analysis = self.strict_analysis(query, &groq_analysis)?;
+                    analysis.level = level;
+                    analysis.is_local = false;
+                    analysis.bypass_reason = None;
+
+                    if let Some(tags) = &mut analysis.metadata_filters.tags {
+                        if let Ok(db_tags) = database.document_repository().get_all_unique_tags() {
+                            tags.retain(|t| db_tags.contains(&t.to_lowercase()));
+                        }
+                    }
+                    if analysis.metadata_filters.tags.as_ref().is_some_and(|t| t.is_empty()) {
+                        analysis.metadata_filters.tags = None;
+                    }
+
+                    if let Some(cats) = &mut analysis.metadata_filters.category {
+                        if let Ok(db_cats) = database.document_repository().get_all_unique_categories() {
+                            cats.retain(|c| db_cats.contains(&c.to_lowercase()));
+                        }
+                    }
+                    if analysis.metadata_filters.category.as_ref().is_some_and(|c| c.is_empty()) {
+                        analysis.metadata_filters.category = None;
+                    }
+
+                    analysis.strategy = self.select_strategy(query, &analysis);
+                    return Ok(analysis);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "[OFFLINE_FALLBACK] Groq analysis failed for Level {:?}: {}. Falling back to deterministic local parsing.",
+                        level, err
+                    );
+                }
+            }
+        }
+
+        let analysis = self.analyze_local(
+            query,
+            level,
+            Some("Groq offline/failed fallback".to_string()),
+        );
         Ok(analysis)
     }
 
@@ -237,6 +328,9 @@ impl QueryAnalyzerService {
             temporal,
             complexity,
             strategy: RetrievalStrategy::Hybrid,
+            level: crate::domain::AnalysisLevel::Level1,
+            is_local: false,
+            bypass_reason: None,
         })
     }
 

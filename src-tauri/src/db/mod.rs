@@ -24,6 +24,11 @@ impl Database {
 
     pub fn connect(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
+        // Enable WAL mode so concurrent readers (eval tools, debug binaries) work
+        // alongside the running Tauri app without SQLITE_BUSY errors.
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        // Retry for up to 5 seconds on lock contention before returning SQLITE_BUSY.
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),

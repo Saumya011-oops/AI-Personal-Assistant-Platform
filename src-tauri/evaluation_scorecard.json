@@ -9,10 +9,10 @@
     "G": 100.0,
     "H": 100.0,
     "I": 100.0,
-    "J": 100.0
+    "J": 83.33332824707031
   },
-  "failed_queries": 0,
-  "overall_score": 100.0,
-  "passed_queries": 18,
+  "failed_queries": 1,
+  "overall_score": 94.44444274902344,
+  "passed_queries": 17,
   "total_queries": 18
 }

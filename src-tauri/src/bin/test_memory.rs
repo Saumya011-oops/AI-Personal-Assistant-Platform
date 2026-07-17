@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
 
     // --- TEST 4: Cleanup & Memory Reset ---
     tracing::info!("Running TEST 4: Clear all memories...");
-    memory_service.clear_all_memories()?;
+    memory_service.clear_all_memories().await?;
     let remaining_mems = memory_service.list_memories()?;
     assert_eq!(remaining_mems.len(), 0);
     tracing::info!("TEST 4 Passed!");

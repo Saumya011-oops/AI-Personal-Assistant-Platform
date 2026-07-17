@@ -10,11 +10,11 @@ use crate::db::Database;
 use crate::domain::{
     AssistantResponse, Citation, ConfidenceBreakdown, DiagChunk, DiagnosticsPayload,
     MetadataFilters, QueryAnalysis, RetrievalResponse, RetrievalStrategy,
-    RetrievedChunk,
+    RetrievedChunk, RetrievalMode,
 };
 use crate::services::context_builder::{BuiltContext, ContextBuilder};
 use crate::services::document_graph::DocumentGraph;
-use crate::services::entity_dictionary::{EntityDictionary, EntityMatch};
+use crate::services::entity_dictionary::{EntityDictionary, EntityMatch, is_token_match, detect_recognized_phrase};
 use crate::services::groq::GroqService;
 use crate::services::ollama::OllamaService;
 use crate::services::qdrant::{QdrantSearchFilter, QdrantSearchResult, QdrantService};
@@ -124,6 +124,25 @@ impl RetrievalService {
         conversation_id: &str,
         intent_router: &crate::services::intent_router::IntentRouter,
     ) -> Result<AssistantResponse> {
+        self.ask_assistant_with_mode(
+            database,
+            memory_service,
+            query,
+            conversation_id,
+            intent_router,
+            RetrievalMode::Production,
+        ).await
+    }
+
+    pub async fn ask_assistant_with_mode(
+        &self,
+        database: &Database,
+        memory_service: &crate::services::memory::MemoryService,
+        query: &str,
+        conversation_id: &str,
+        intent_router: &crate::services::intent_router::IntentRouter,
+        mode: RetrievalMode,
+    ) -> Result<AssistantResponse> {
         // ── Step 1: Load conversation context (always needed) ─────────────
         let (convo_summary, recent_messages) =
             memory_service.get_chat_history_for_prompt(conversation_id, 2000).await?;
@@ -133,7 +152,7 @@ impl RetrievalService {
         tracing::info!("[INTENT_ROUTER] query={:?} → intent={}", query, intent);
 
         // ── Step 3: Dispatch ──────────────────────────────────────────────
-        let mut response = match intent {
+        let response = match intent {
             crate::services::intent_router::IntentClass::MemoryStore => {
                 self.handle_memory_store(
                     memory_service,
@@ -165,12 +184,13 @@ impl RetrievalService {
             crate::services::intent_router::IntentClass::RagQuery => {
                 let relevant_memories = memory_service.retrieve_memories_for_query(query, 5).await?;
                 let memories_json = Self::memories_to_json(&relevant_memories);
-                let mut resp = self.ask_assistant_rag_core(
+                let mut resp = self.ask_assistant_rag_core_with_mode(
                     database,
                     query,
                     convo_summary.as_deref(),
                     &relevant_memories,
                     &recent_messages,
+                    mode,
                 ).await?;
                 resp.memories = Some(memories_json);
                 resp
@@ -180,12 +200,13 @@ impl RetrievalService {
             crate::services::intent_router::IntentClass::HybridQuery => {
                 let relevant_memories = memory_service.retrieve_memories_for_query(query, 8).await?;
                 let memories_json = Self::memories_to_json(&relevant_memories);
-                let mut resp = self.ask_assistant_rag_core(
+                let mut resp = self.ask_assistant_rag_core_with_mode(
                     database,
                     query,
                     convo_summary.as_deref(),
                     &relevant_memories,
                     &recent_messages,
+                    mode,
                 ).await?;
                 resp.memories = Some(memories_json);
                 resp
@@ -313,6 +334,7 @@ impl RetrievalService {
             diagnostics: None,
             conversation_id: None,
             memories: Some(Vec::new()),
+            assembled_prompt: None,
         })
     }
 
@@ -384,6 +406,7 @@ impl RetrievalService {
             diagnostics: None,
             conversation_id: None,
             memories: Some(Self::memories_to_json(relevant_memories)),
+            assembled_prompt: None,
         })
     }
 
@@ -426,6 +449,7 @@ impl RetrievalService {
             diagnostics: None,
             conversation_id: None,
             memories: Some(Vec::new()),
+            assembled_prompt: None,
         })
     }
 
@@ -454,6 +478,25 @@ impl RetrievalService {
         convo_summary: Option<&str>,
         relevant_memories: &[crate::services::memory::RankedMemory],
         recent_messages: &[crate::services::memory::DbMessage],
+    ) -> Result<AssistantResponse> {
+        self.ask_assistant_rag_core_with_mode(
+            database,
+            query,
+            convo_summary,
+            relevant_memories,
+            recent_messages,
+            RetrievalMode::Production,
+        ).await
+    }
+
+    pub async fn ask_assistant_rag_core_with_mode(
+        &self,
+        database: &Database,
+        query: &str,
+        convo_summary: Option<&str>,
+        relevant_memories: &[crate::services::memory::RankedMemory],
+        recent_messages: &[crate::services::memory::DbMessage],
+        mode: RetrievalMode,
     ) -> Result<AssistantResponse> {
         // ── RAG_DEBUG_MODE: bypass all confidence gating for diagnosis ─────────
         let debug_mode = std::env::var("RAG_DEBUG_MODE")
@@ -509,6 +552,7 @@ impl RetrievalService {
                 diagnostics: None,
                 conversation_id: None,
                 memories: None,
+                assembled_prompt: None,
             });
         } else if !scored_groups.is_empty() && (!should_trigger_ambiguity || matching_groups.len() == 1) {
             let cluster_name = &scored_groups[0].0;
@@ -524,39 +568,25 @@ impl RetrievalService {
                 convo_summary,
                 relevant_memories,
                 recent_messages,
+                mode,
             ).await;
         }
         drop(dict);
 
         let retrieval_start = std::time::Instant::now();
-        let retrieval = self.retrieve_documents(database, query).await?;
+        let retrieval = self.retrieve_documents_with_mode(database, query, mode).await?;
         let retrieval_latency_ms = retrieval_start.elapsed().as_millis() as u32;
 
-        let mut retrieval_results = retrieval.results.clone();
-        for chunk in &mut retrieval_results {
-            chunk.retrieval_score = Some(chunk.score);
-        }
+        let mut reranked_chunks = retrieval.results.clone();
+        let pre_rerank_chunks = reranked_chunks.clone();
+        let post_rerank_chunks = reranked_chunks.clone();
+        let rerank_latency_ms = 0; // Rerank is now unified inside retrieve_documents_with_mode
 
         // ── Expanded query (for diagnostics payload) ───────────────────────────
         let expanded_query = self.expand_query(query).await;
 
-        // ── Pre-rerank snapshot (recall evaluation checkpoint 1) ───────────────
-        let pre_rerank_chunks = retrieval_results.clone();
-
-        let rerank_start = std::time::Instant::now();
-        let reranked_chunks = if retrieval.strategy_used == crate::domain::RetrievalStrategy::Recursive {
-            let mut top_chunks = retrieval_results;
-            top_chunks.truncate(10);
-            top_chunks
-        } else {
-            self.reranker_service
-                .rerank(query, retrieval_results, 10)
-                .await?
-        };
-        let rerank_latency_ms = rerank_start.elapsed().as_millis() as u32;
-
-        // ── Post-rerank snapshot (recall evaluation checkpoint 2) ──────────────
-        let post_rerank_chunks = reranked_chunks.clone();
+        // Truncate to 10 for RAG generation context
+        reranked_chunks.truncate(10);
 
         // ── [RERANKER] structured score log (raw logit + sigmoid for calibration)
         let (p50, p75, p90, p95) = {
@@ -633,24 +663,17 @@ impl RetrievalService {
             Some(serde_json::to_string(&lineages)?)
         };
 
+        // Captured prompt for evaluation tracing (populated by the main RAG path)
+        let mut assembled_prompt_captured = String::new();
+
         // ── Main answer / bypass logic ─────────────────────────────────────────
         // ── Stage 6: Confidence gate (memory-aware) ──────────────────────────────
-        //
-        // The gate ONLY affects document retrieval confidence.  Memories,
-        // conversation summaries, and recent messages ALWAYS flow through to
-        // the LLM — they are never suppressed by RAG confidence status.
-        //
-        // • EMPTY_RETRIEVAL + memories available  → answer from memory
-        // • EMPTY_RETRIEVAL + no memories         → return graceful fallback
-        // • LOW_CONFIDENCE  + memories available  → answer from memory
-        // • LOW_CONFIDENCE  + no memories         → return graceful fallback
-        // • AMBIGUOUS_RETRIEVAL                   → disambiguation prompt (unchanged)
         let (answer, citations, fact_coverage) = if !debug_mode && confidence_report.status == "EMPTY_RETRIEVAL" {
             if !relevant_memories.is_empty() {
                 // Answer from memory instead of returning a hard fallback
                 let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
                 let empty_ctx = BuiltContext { context_text: String::new(), chunks: Vec::new() };
-                let raw_ans = self.generate_answer(
+                let (raw_ans, _) = self.generate_answer(
                     query, &retrieval.analysis, &empty_ctx,
                     convo_summary, &lt_mems, &ep_mems, recent_messages,
                 ).await?;
@@ -668,7 +691,7 @@ impl RetrievalService {
                 // Answer from memory — don't return LOW_CONFIDENCE fallback string
                 let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
                 let empty_ctx = BuiltContext { context_text: String::new(), chunks: Vec::new() };
-                let raw_ans = self.generate_answer(
+                let (raw_ans, _) = self.generate_answer(
                     query, &retrieval.analysis, &empty_ctx,
                     convo_summary, &lt_mems, &ep_mems, recent_messages,
                 ).await?;
@@ -792,7 +815,7 @@ impl RetrievalService {
                         long_term_mems.push(rm.memory.content.clone());
                     }
                 }
-                let raw_ans = self.generate_answer(
+                let (raw_ans, cap) = self.generate_answer(
                     query,
                     &retrieval.analysis,
                     &built_context,
@@ -801,6 +824,7 @@ impl RetrievalService {
                     &episodic_mems,
                     recent_messages,
                 ).await?;
+                assembled_prompt_captured = cap;
                 {
                     let memory_strs: Vec<String> = relevant_memories.iter()
                         .map(|rm| rm.memory.content.clone()).collect();
@@ -1052,6 +1076,7 @@ impl RetrievalService {
             diagnostics: Some(diagnostics),
             conversation_id: None,
             memories: None,
+            assembled_prompt: Some(assembled_prompt_captured),
         })
     }
 
@@ -1236,7 +1261,7 @@ impl RetrievalService {
             if skip_words.contains(&kw_lower) {
                 continue;
             }
-            if !chunks_text.contains(kw) {
+            if !is_token_match(&chunks_text, &kw_lower) {
                 missing_core_keyword = true;
                 missing_kws.push(kw.clone());
             }
@@ -1343,12 +1368,12 @@ impl RetrievalService {
         let status = if is_empty {
             reasons.push("No chunks found or all chunk scores are below minimum matching relevance.".to_string());
             "EMPTY_RETRIEVAL".to_string()
-        } else if is_ambiguous {
-            reasons.push("Multiple documents competing across distinct topic clusters.".to_string());
-            "AMBIGUOUS_RETRIEVAL".to_string()
         } else if is_low_confidence {
             reasons.push("Overall low matching confidence across retrieval layers.".to_string());
             "LOW_CONFIDENCE_RETRIEVAL".to_string()
+        } else if is_ambiguous {
+            reasons.push("Multiple documents competing across distinct topic clusters.".to_string());
+            "AMBIGUOUS_RETRIEVAL".to_string()
         } else if is_partial {
             reasons.push("Partial context retrieved; some sources may be weakly relevant.".to_string());
             "PARTIAL_RETRIEVAL".to_string()
@@ -1424,6 +1449,7 @@ impl RetrievalService {
         convo_summary: Option<&str>,
         relevant_memories: &[crate::services::memory::RankedMemory],
         recent_messages: &[crate::services::memory::DbMessage],
+        mode: RetrievalMode,
     ) -> Result<AssistantResponse> {
         let dict = self.entity_dictionary.read().await;
         tracing::info!(
@@ -1446,13 +1472,12 @@ impl RetrievalService {
                 "[BROAD_TOPIC] cluster={:?} has no docs, falling back to normal retrieval",
                 cluster_name
             );
-            let retrieval = self.retrieve_documents(database, query).await?;
-            let retrieval_results = retrieval.results.clone();
-            let reranked = self.reranker_service.rerank(query, retrieval_results, 10).await?;
+            let retrieval = self.retrieve_documents_with_mode(database, query, mode).await?;
+            let reranked = retrieval.results.clone();
             let top_chunks: Vec<RetrievedChunk> = reranked.into_iter().take(3).collect();
             let built_context = self.context_builder.build(top_chunks.clone());
             let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
-            let raw_answer = self.generate_answer(query, &retrieval.analysis, &built_context, convo_summary, &lt_mems, &ep_mems, recent_messages).await?;
+            let (raw_answer, _) = self.generate_answer(query, &retrieval.analysis, &built_context, convo_summary, &lt_mems, &ep_mems, recent_messages).await?;
 
             let memory_strs: Vec<String> = relevant_memories.iter().map(|rm| rm.memory.content.clone()).collect();
             let (mut answer, total_sent, kept_sent, removed_sent) = verify_and_ground_answer(&self.ollama_service, &raw_answer, &top_chunks, &memory_strs).await?;
@@ -1542,6 +1567,7 @@ impl RetrievalService {
                 diagnostics: None,
                 conversation_id: None,
                 memories: None,
+                assembled_prompt: None,
             });
         }
 
@@ -1562,6 +1588,9 @@ impl RetrievalService {
                 continue;
             }
             let mut hydrated = hydrate_chunk_ids(database, &chunk_ids)?;
+            if matches!(mode, RetrievalMode::Production) {
+                hydrated.retain(|c| c.source != "open_ragbench");
+            }
             for chunk in &mut hydrated {
                 chunk.retrieval_score = Some(chunk.score);
             }
@@ -1586,6 +1615,7 @@ impl RetrievalService {
                 diagnostics: None,
                 conversation_id: None,
                 memories: None,
+                assembled_prompt: None,
             });
         }
 
@@ -1609,10 +1639,13 @@ impl RetrievalService {
             temporal: false,
             complexity: crate::domain::QueryComplexity::Complex,
             strategy: RetrievalStrategy::Hybrid,
+            level: crate::domain::AnalysisLevel::Level1,
+            is_local: true,
+            bypass_reason: Some("Dummy analysis for broad topic".to_string()),
         };
 
         let (lt_mems, ep_mems) = split_memories_by_type(relevant_memories);
-        let raw_answer = self
+        let (raw_answer, _) = self
             .generate_answer(query, &dummy_analysis, &built_context, convo_summary, &lt_mems, &ep_mems, recent_messages)
             .await?;
 
@@ -1716,6 +1749,7 @@ impl RetrievalService {
             diagnostics: None,
             conversation_id: None,
             memories: None,
+            assembled_prompt: None,
         })
     }
 
@@ -1729,18 +1763,71 @@ impl RetrievalService {
         database: &Database,
         query: &str,
     ) -> Result<RetrievalResponse> {
+        self.retrieve_documents_with_mode(database, query, RetrievalMode::Production).await
+    }
+
+    pub async fn retrieve_documents_with_mode(
+        &self,
+        database: &Database,
+        query: &str,
+        mode: RetrievalMode,
+    ) -> Result<RetrievalResponse> {
+        self.retrieve_and_rank(database, query, mode).await
+    }
+
+    pub async fn retrieve_and_rank(
+        &self,
+        database: &Database,
+        query: &str,
+        mode: RetrievalMode,
+    ) -> Result<RetrievalResponse> {
+        let t_total = std::time::Instant::now();
+
+        let t_analysis = std::time::Instant::now();
         let analysis = self.query_analyzer_service.analyze(database, query).await?;
+        let analysis_ms = t_analysis.elapsed().as_millis();
         
+        let t_retrieval = std::time::Instant::now();
         let results = self
-            .retrieve_with_strategy(database, query, &analysis.strategy, &analysis, 0)
+            .retrieve_with_strategy(database, query, &analysis.strategy, &analysis, 0, mode)
             .await?;
+        let retrieval_ms = t_retrieval.elapsed().as_millis();
+
+        let t_rerank = std::time::Instant::now();
+        let reranked_chunks = if analysis.strategy == crate::domain::RetrievalStrategy::Recursive {
+            let mut top_chunks = results;
+            top_chunks.truncate(10);
+            top_chunks
+        } else {
+            let limit = results.len().min(20);
+            self.reranker_service
+                .rerank(query, results, limit)
+                .await?
+        };
+        let rerank_ms = t_rerank.elapsed().as_millis();
+
+        let t_boost = std::time::Instant::now();
+        let mut final_results = reranked_chunks;
+        apply_metadata_boosts(&mut final_results, &analysis.metadata_filters, query);
+
+        for chunk in &mut final_results {
+            chunk.final_score = Some(chunk.score);
+        }
+        sort_descending(&mut final_results);
+        let boost_ms = t_boost.elapsed().as_millis();
+
+        let total_ms = t_total.elapsed().as_millis();
+        println!(
+            "[LATENCY_PROFILE] query={:?} total={}ms (analysis={}ms, retrieval={}ms, rerank={}ms, boost={}ms) | level={:?}, is_local={}, bypass_reason={:?}",
+            query, total_ms, analysis_ms, retrieval_ms, rerank_ms, boost_ms, analysis.level, analysis.is_local, analysis.bypass_reason
+        );
 
         Ok(RetrievalResponse {
             query: query.to_string(),
             strategy_used: analysis.strategy.clone(),
-            total_results: results.len(),
+            total_results: final_results.len(),
             analysis,
-            results,
+            results: final_results,
             confidence: None,
         })
     }
@@ -1752,22 +1839,33 @@ impl RetrievalService {
         strategy: &RetrievalStrategy,
         analysis: &QueryAnalysis,
         depth: usize,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
+        let t_expand = std::time::Instant::now();
         let search_query = self.expand_query(query).await;
+        let expand_ms = t_expand.elapsed().as_millis();
+
+        let t_search = std::time::Instant::now();
         let mut results = match strategy {
             RetrievalStrategy::Dense => {
-                self.retrieve_dense(database, &search_query, analysis.metadata_filters.as_ref(), 20)
+                self.retrieve_dense(database, &search_query, analysis.metadata_filters.as_ref(), 20, mode)
                     .await?
             }
             RetrievalStrategy::Sparse => {
-                self.retrieve_sparse(database, &search_query, analysis.metadata_filters.as_ref(), 20)
+                self.retrieve_sparse(database, &search_query, analysis.metadata_filters.as_ref(), 20, mode)
                     .await?
             }
-            RetrievalStrategy::Hybrid => self.retrieve_hybrid(database, &search_query, analysis, 30).await?,
-            RetrievalStrategy::Faceted => self.retrieve_faceted(database, &search_query, analysis).await?,
-            RetrievalStrategy::Contextual => self.retrieve_contextual(database, &search_query, analysis).await?,
-            RetrievalStrategy::Recursive => self.retrieve_recursive(database, query, analysis, depth).await?,
+            RetrievalStrategy::Hybrid => self.retrieve_hybrid(database, &search_query, analysis, 30, mode).await?,
+            RetrievalStrategy::Faceted => self.retrieve_faceted(database, &search_query, analysis, mode).await?,
+            RetrievalStrategy::Contextual => self.retrieve_contextual(database, &search_query, analysis, mode).await?,
+            RetrievalStrategy::Recursive => self.retrieve_recursive(database, query, analysis, depth, mode).await?,
         };
+        let search_ms = t_search.elapsed().as_millis();
+
+        println!(
+            "  [RETRIEVAL_SUBSTAGE] strategy={:?} candidates={} expand={}ms search={}ms",
+            strategy, results.len(), expand_ms, search_ms
+        );
 
         let count_before = results.len();
 
@@ -1783,17 +1881,11 @@ impl RetrievalService {
         results.retain(|chunk| matches_filters(chunk, &date_filters));
         let count_after_date = results.len();
 
-        // 3. Apply soft boosting for other metadata/facets and titles
-        apply_metadata_boosts(&mut results, &analysis.metadata_filters, query);
-        sort_descending(&mut results);
-        let count_after_boosting = results.len();
-
         // Print telemetry log
         println!("[FACET_FILTER]");
         println!("before={} chunks", count_before);
         println!("after_author_filter={}", count_after_author);
         println!("after_date_filter={}", count_after_date);
-        println!("after_boosting={}", count_after_boosting);
         println!();
 
         Ok(results)
@@ -1805,19 +1897,63 @@ impl RetrievalService {
         query: &str,
         filters: Option<&MetadataFilters>,
         limit: usize,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
         let query_embeddings = self.ollama_service.generate_embeddings(&[query.to_string()]).await?;
         let Some(query_vector) = query_embeddings.into_iter().next() else {
             return Err(anyhow!("query embedding generation returned no vectors"));
         };
 
-        let filter = filters.and_then(build_qdrant_filter);
+        let mut filter = filters.and_then(build_qdrant_filter).unwrap_or(QdrantSearchFilter {
+            must: Vec::new(),
+            should: Vec::new(),
+            must_not: Vec::new(),
+        });
+
+        if matches!(mode, RetrievalMode::Production) {
+            filter.must_not.push(json!({
+                "key": "source",
+                "match": { "value": "open_ragbench" }
+            }));
+        }
+
+        let filter_opt = if filter.must.is_empty() && filter.should.is_empty() && filter.must_not.is_empty() {
+            None
+        } else {
+            Some(filter)
+        };
+
         let results = self
             .qdrant_service
-            .search_similar_points(query_vector, limit, filter)
+            .search_similar_points(query_vector, limit, filter_opt)
             .await?;
 
-        self.hydrate_qdrant_results(database, results)
+        let mut hydrated = self.hydrate_qdrant_results(database, results)?;
+        
+        // Stage 3: Phrase-First Filter
+        if let Some(phrase) = detect_recognized_phrase(query) {
+            let phrase_matches: Vec<RetrievedChunk> = hydrated.iter()
+                .filter(|c| {
+                    let chunk_text = format!("{} {}", c.content.to_lowercase(), c.document_title.to_lowercase());
+                    is_token_match(&chunk_text, &phrase)
+                })
+                .cloned()
+                .collect();
+            
+            if !phrase_matches.is_empty() {
+                hydrated = phrase_matches;
+                tracing::info!(
+                    "[PHRASE_FIRST] Phrase '{}' matched in {} dense chunks; filtering to phrase matches only",
+                    phrase, hydrated.len()
+                );
+            } else {
+                tracing::info!(
+                    "[PHRASE_FIRST] Phrase '{}' did not match any dense chunks; falling back to token-level",
+                    phrase
+                );
+            }
+        }
+        Ok(hydrated)
     }
 
     async fn retrieve_sparse(
@@ -1826,6 +1962,7 @@ impl RetrievalService {
         query: &str,
         filters: Option<&MetadataFilters>,
         limit: usize,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
         let sparse_hits = self
             .sparse_service
@@ -1836,13 +1973,43 @@ impl RetrievalService {
             .map(|hit| hit.chunk_id.clone())
             .collect::<Vec<_>>();
         let mut hydrated = hydrate_chunk_ids(database, &ordered_chunk_ids)?;
+        if matches!(mode, RetrievalMode::Production) {
+            hydrated.retain(|c| c.source != "open_ragbench");
+        }
         let score_map = sparse_hits
             .into_iter()
             .map(|hit| (hit.chunk_id, hit.score))
             .collect::<HashMap<_, _>>();
 
         for chunk in &mut hydrated {
-            chunk.score = score_map.get(&chunk.chunk_id).copied().unwrap_or_default();
+            let score_val = score_map.get(&chunk.chunk_id).copied().unwrap_or_default();
+            chunk.score = score_val;
+            chunk.sparse_score = Some(score_val);
+            chunk.retrieval_score = Some(score_val);
+        }
+
+        // Stage 3: Phrase-First Filter
+        if let Some(phrase) = detect_recognized_phrase(query) {
+            let phrase_matches: Vec<RetrievedChunk> = hydrated.iter()
+                .filter(|c| {
+                    let chunk_text = format!("{} {}", c.content.to_lowercase(), c.document_title.to_lowercase());
+                    is_token_match(&chunk_text, &phrase)
+                })
+                .cloned()
+                .collect();
+            
+            if !phrase_matches.is_empty() {
+                hydrated = phrase_matches;
+                tracing::info!(
+                    "[PHRASE_FIRST] Phrase '{}' matched in {} sparse chunks; filtering to phrase matches only",
+                    phrase, hydrated.len()
+                );
+            } else {
+                tracing::info!(
+                    "[PHRASE_FIRST] Phrase '{}' did not match any sparse chunks; falling back to token-level",
+                    phrase
+                );
+            }
         }
 
         sort_descending(&mut hydrated);
@@ -1855,12 +2022,13 @@ impl RetrievalService {
         query: &str,
         analysis: &QueryAnalysis,
         limit: usize,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
         // Dense retrieval is best-effort: if Qdrant is unavailable, fall back to
         // sparse-only rather than propagating an error and breaking the entire pipeline.
         let search_limit = limit.max(30);
         let dense = match self
-            .retrieve_dense(database, query, analysis.metadata_filters.as_ref(), search_limit)
+            .retrieve_dense(database, query, analysis.metadata_filters.as_ref(), search_limit, mode)
             .await
         {
             Ok(chunks) => {
@@ -1877,28 +2045,53 @@ impl RetrievalService {
             }
         };
         let sparse = self
-            .retrieve_sparse(database, query, analysis.metadata_filters.as_ref(), search_limit)
+            .retrieve_sparse(database, query, analysis.metadata_filters.as_ref(), search_limit, mode)
             .await?;
 
         let mut scores = HashMap::<String, f32>::new();
         let mut chunk_map = HashMap::<String, RetrievedChunk>::new();
+        let mut dense_scores = HashMap::<String, f32>::new();
+        let mut sparse_scores = HashMap::<String, f32>::new();
 
         for (rank, chunk) in dense.into_iter().enumerate() {
             let score = reciprocal_rank_fusion(rank + 1);
             *scores.entry(chunk.chunk_id.clone()).or_default() += score;
+            if let Some(ds) = chunk.dense_score {
+                dense_scores.insert(chunk.chunk_id.clone(), ds);
+            }
             chunk_map.entry(chunk.chunk_id.clone()).or_insert(chunk);
         }
 
         for (rank, chunk) in sparse.into_iter().enumerate() {
             let score = reciprocal_rank_fusion(rank + 1);
             *scores.entry(chunk.chunk_id.clone()).or_default() += score;
-            chunk_map.entry(chunk.chunk_id.clone()).or_insert(chunk);
+            if let Some(ss) = chunk.sparse_score {
+                sparse_scores.insert(chunk.chunk_id.clone(), ss);
+            }
+            let entry = chunk_map.entry(chunk.chunk_id.clone());
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut occ) => {
+                    occ.get_mut().sparse_score = chunk.sparse_score;
+                }
+                std::collections::hash_map::Entry::Vacant(vac) => {
+                    vac.insert(chunk);
+                }
+            }
         }
 
         let mut merged = chunk_map
             .into_iter()
             .map(|(chunk_id, mut chunk)| {
-                chunk.score = scores.get(&chunk_id).copied().unwrap_or_default();
+                let fused = scores.get(&chunk_id).copied().unwrap_or_default();
+                chunk.score = fused;
+                chunk.fused_score = Some(fused);
+                chunk.retrieval_score = Some(fused);
+                if chunk.dense_score.is_none() {
+                    chunk.dense_score = dense_scores.get(&chunk_id).copied();
+                }
+                if chunk.sparse_score.is_none() {
+                    chunk.sparse_score = sparse_scores.get(&chunk_id).copied();
+                }
                 chunk
             })
             .collect::<Vec<_>>();
@@ -1913,8 +2106,9 @@ impl RetrievalService {
         database: &Database,
         query: &str,
         analysis: &QueryAnalysis,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
-        let mut results = self.retrieve_hybrid(database, query, analysis, 30).await?;
+        let mut results = self.retrieve_hybrid(database, query, analysis, 30, mode).await?;
         if let Some(ref authors) = analysis.metadata_filters.author {
             filter_by_author(&mut results, authors);
         }
@@ -1929,8 +2123,9 @@ impl RetrievalService {
         database: &Database,
         query: &str,
         analysis: &QueryAnalysis,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
-        let mut results = self.retrieve_hybrid(database, query, analysis, 30).await?;
+        let mut results = self.retrieve_hybrid(database, query, analysis, 30, mode).await?;
         let now = Utc::now();
 
         for chunk in &mut results {
@@ -1959,6 +2154,7 @@ impl RetrievalService {
         query: &str,
         analysis: &QueryAnalysis,
         depth: usize,
+        mode: RetrievalMode,
     ) -> Result<Vec<RetrievedChunk>> {
         let dict = self.entity_dictionary.read().await;
         let entity_matches = dict.score_entities(query, analysis);
@@ -2086,7 +2282,7 @@ impl RetrievalService {
 
             if intent_type == QueryIntentType::Comparison {
                 if executed_passes < 6 {
-                    let chunks = self.retrieve_hybrid(database, &target_x, &clean_analysis, 30).await?;
+                    let chunks = self.retrieve_hybrid(database, &target_x, &clean_analysis, 30, mode).await?;
                     hop1_chunks.extend(chunks);
                     executed_passes += 1;
                 } else {
@@ -2094,7 +2290,7 @@ impl RetrievalService {
                 }
 
                 if executed_passes < 6 {
-                    let chunks = self.retrieve_hybrid(database, &target_y, &clean_analysis, 30).await?;
+                    let chunks = self.retrieve_hybrid(database, &target_y, &clean_analysis, 30, mode).await?;
                     hop1_chunks.extend(chunks);
                     executed_passes += 1;
                 } else {
@@ -2103,7 +2299,7 @@ impl RetrievalService {
 
                 if executed_passes < 6 {
                     let joint = format!("{} {}", target_x, target_y);
-                    let chunks = self.retrieve_hybrid(database, &joint, &clean_analysis, 30).await?;
+                    let chunks = self.retrieve_hybrid(database, &joint, &clean_analysis, 30, mode).await?;
                     hop1_chunks.extend(chunks);
                     executed_passes += 1;
                 } else {
@@ -2114,7 +2310,7 @@ impl RetrievalService {
                 let mut y_chunks = Vec::new();
 
                 if executed_passes < 6 {
-                    x_chunks = self.retrieve_hybrid(database, &target_x, &clean_analysis, 30).await?;
+                    x_chunks = self.retrieve_hybrid(database, &target_x, &clean_analysis, 30, mode).await?;
                     hop1_chunks.extend(x_chunks.clone());
                     executed_passes += 1;
                 } else {
@@ -2122,7 +2318,7 @@ impl RetrievalService {
                 }
 
                 if executed_passes < 6 {
-                    y_chunks = self.retrieve_hybrid(database, &target_y, &clean_analysis, 30).await?;
+                    y_chunks = self.retrieve_hybrid(database, &target_y, &clean_analysis, 30, mode).await?;
                     hop1_chunks.extend(y_chunks.clone());
                     executed_passes += 1;
                 } else {
@@ -2211,7 +2407,7 @@ impl RetrievalService {
 
                 if executed_passes < 6 {
                     let search_query = self.expand_query(&bridge_query).await;
-                    let chunks = self.retrieve_hybrid(database, &search_query, &clean_analysis, 40).await?;
+                    let chunks = self.retrieve_hybrid(database, &search_query, &clean_analysis, 40, mode).await?;
                     hop1_chunks.extend(chunks);
                     executed_passes += 1;
                 } else {
@@ -2241,7 +2437,7 @@ impl RetrievalService {
             for sub_q in sub_queries {
                 if executed_passes < 6 {
                     let search_query = self.expand_query(&sub_q).await;
-                    let sub_chunks = self.retrieve_hybrid(database, &search_query, &clean_analysis, 45).await?;
+                    let sub_chunks = self.retrieve_hybrid(database, &search_query, &clean_analysis, 45, mode).await?;
                     hop1_chunks.extend(sub_chunks);
                     executed_passes += 1;
                 } else {
@@ -2484,6 +2680,9 @@ impl RetrievalService {
         Ok(reranked_diverse)
     }
 
+    /// Generates an LLM answer given the assembled context.
+    /// Returns `(answer, assembled_user_prompt)` so callers can capture the prompt
+    /// for evaluation tracing without requiring a separate builder call.
     async fn generate_answer(
         &self,
         query: &str,
@@ -2493,7 +2692,7 @@ impl RetrievalService {
         long_term_mems: &[String],
         episodic_mems: &[String],
         recent_messages: &[crate::services::memory::DbMessage],
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         let dict = self.entity_dictionary.read().await;
         let intent_type = determine_query_intent(query, analysis, &dict);
         let structured = extract_structured_context(&context.chunks);
@@ -2593,11 +2792,14 @@ impl RetrievalService {
             })
         };
 
-        self.groq_service.chat_text(&system_prompt, &user_prompt).await
+        let answer = self.groq_service.chat_text(&system_prompt, &user_prompt).await?;
+        Ok((answer, user_prompt))
     }
 
     pub async fn initialize(&self, database: &Database) -> Result<()> {
-        self.ensure_groq_ready()?;
+        if let Err(e) = self.ensure_groq_ready() {
+            tracing::warn!("[OFFLINE_MODE] Groq is not configured: {}. Retrieval service will operate in local-only fallback mode.", e);
+        }
         self.sparse_service.initialize().await?;
         let documents = database.document_repository().list_all_chunk_search_documents()?;
         self.sparse_service.rebuild_index(&documents).await?;
@@ -2651,7 +2853,10 @@ impl RetrievalService {
             .collect::<HashMap<_, _>>();
 
         for chunk in &mut hydrated {
-            chunk.score = score_map.get(&chunk.chunk_id).copied().unwrap_or_default();
+            let score_val = score_map.get(&chunk.chunk_id).copied().unwrap_or_default();
+            chunk.score = score_val;
+            chunk.dense_score = Some(score_val);
+            chunk.retrieval_score = Some(score_val);
         }
         sort_descending(&mut hydrated);
         Ok(hydrated)
@@ -3127,6 +3332,11 @@ fn hydrate_chunk_ids(database: &Database, ordered_chunk_ids: &[String]) -> Resul
                 content: row.content.clone(),
                 score: 0.0,
                 retrieval_score: None,
+                dense_score: None,
+                sparse_score: None,
+                fused_score: None,
+                reranker_score: None,
+                final_score: None,
                 ordinal: row.ordinal,
                 path_or_url: row.path_or_url.clone(),
                 tags: row.tags.clone(),
@@ -4117,7 +4327,7 @@ fn apply_metadata_boosts(chunks: &mut [RetrievedChunk], filters: &MetadataFilter
             .collect();
 
         for w in &query_words {
-            if title_lower.contains(w) || slug_lower.contains(w) {
+            if is_token_match(&title_lower, w) || is_token_match(&slug_lower, w) {
                 title_word_matches += 1;
             }
         }
@@ -4131,8 +4341,8 @@ fn apply_metadata_boosts(chunks: &mut [RetrievedChunk], filters: &MetadataFilter
             for window in query_words.windows(2) {
                 let phrase = window.join(" ");
                 let phrase_und = window.join("_");
-                if title_lower.contains(&phrase) || slug_lower.contains(&phrase) 
-                    || title_lower.contains(&phrase_und) || slug_lower.contains(&phrase_und) 
+                if is_token_match(&title_lower, &phrase) || is_token_match(&slug_lower, &phrase) 
+                    || is_token_match(&title_lower, &phrase_und) || is_token_match(&slug_lower, &phrase_und) 
                 {
                     boost += 6.0;
                 }
@@ -4142,11 +4352,23 @@ fn apply_metadata_boosts(chunks: &mut [RetrievedChunk], filters: &MetadataFilter
             for window in query_words.windows(3) {
                 let phrase = window.join(" ");
                 let phrase_und = window.join("_");
-                if title_lower.contains(&phrase) || slug_lower.contains(&phrase) 
-                    || title_lower.contains(&phrase_und) || slug_lower.contains(&phrase_und) 
+                if is_token_match(&title_lower, &phrase) || is_token_match(&slug_lower, &phrase) 
+                    || is_token_match(&title_lower, &phrase_und) || is_token_match(&slug_lower, &phrase_und) 
                 {
                     boost += 8.0;
                 }
+            }
+        }
+
+        // Stage 3 Boost: Strong ranking boost for exact recognized phrase matches
+        if let Some(phrase) = detect_recognized_phrase(query) {
+            let chunk_text = format!("{} {}", chunk.content.to_lowercase(), chunk.document_title.to_lowercase());
+            if is_token_match(&chunk_text, &phrase) {
+                boost += 15.0;
+                tracing::debug!(
+                    "[PHRASE_BOOST] Chunk ID {} received +15.0 boost for matching phrase '{}'",
+                    chunk.chunk_id, phrase
+                );
             }
         }
 
@@ -4184,9 +4406,9 @@ fn is_ambiguous_retrieval(
         // Check if there is any specific entity mentioned
         let mut has_specific_entity = false;
         for group in &entity_dict.groups {
-            let name_match = query_words.contains(&group.name.to_lowercase());
-            let primary_match = group.primary_terms.iter().any(|t| query_words.contains(&t.to_lowercase()));
-            let specific_match = group.specific_terms.iter().any(|t| query_words.contains(&t.to_lowercase()));
+            let name_match = is_token_match(&query_lower, &group.name.to_lowercase());
+            let primary_match = group.primary_terms.iter().any(|t| is_token_match(&query_lower, &t.to_lowercase()));
+            let specific_match = group.specific_terms.iter().any(|t| is_token_match(&query_lower, &t.to_lowercase()));
             if name_match || primary_match || specific_match {
                 has_specific_entity = true;
                 break;
@@ -4625,6 +4847,11 @@ mod tests {
             content: "Mock Content".to_string(),
             score,
             retrieval_score: Some(retrieval_score),
+            dense_score: None,
+            sparse_score: None,
+            fused_score: None,
+            reranker_score: None,
+            final_score: None,
             ordinal: 0,
             path_or_url: None,
             tags: Vec::new(),
@@ -4646,6 +4873,11 @@ mod tests {
             content: content.to_string(),
             score,
             retrieval_score: Some(score),
+            dense_score: None,
+            sparse_score: None,
+            fused_score: None,
+            reranker_score: None,
+            final_score: None,
             ordinal: 0,
             path_or_url: None,
             tags: Vec::new(),
@@ -4957,6 +5189,9 @@ mod tests {
             temporal: false,
             complexity: crate::domain::QueryComplexity::Simple,
             strategy,
+            level: crate::domain::AnalysisLevel::Level1,
+            is_local: true,
+            bypass_reason: None,
         };
 
         // Broad Topic Synthesis
@@ -5140,16 +5375,16 @@ mod tests {
         
         let dict = EntityDictionary::build(&docs);
         
-        // Verify monitoring group was enriched
-        let mon_group = dict.group_for_cluster("monitoring");
-        assert!(mon_group.is_some(), "Static monitoring group should exist");
-        let mon_group = mon_group.unwrap();
+        // Verify monitoring group remained immutable (no 'alerts' added)
+        let mon_group = dict.group_for_cluster("monitoring").unwrap();
+        assert!(!mon_group.specific_terms.contains(&"alerts".to_string()), "Static monitoring group should not be polluted");
         
-        // Verify terms from tags/category/metadata were added as specific/expansion terms
-        assert!(mon_group.specific_terms.iter().any(|t| t == "alerts"), "Should discover tag 'alerts'");
-        assert!(mon_group.specific_terms.iter().any(|t| t == "devops"), "Should discover category 'devops'");
-        assert!(mon_group.specific_terms.iter().any(|t| t == "loki"), "Should discover Loki from metadata/content");
-        assert!(mon_group.specific_terms.iter().any(|t| t == "grafana"), "Should discover Grafana from metadata");
+        // Verify dynamic group was created for tag 'alerts'
+        let alerts_group = dict.group_for_cluster("alerts");
+        assert!(alerts_group.is_some(), "Dynamic group for tag 'alerts' should exist");
+        let alerts_group = alerts_group.unwrap();
+        assert!(alerts_group.expansion_terms.iter().any(|t| t == "loki"), "Dynamic group should discover Loki");
+        assert!(alerts_group.expansion_terms.iter().any(|t| t == "grafana"), "Dynamic group should discover Grafana");
     }
 
     #[test]
@@ -5181,6 +5416,9 @@ mod tests {
             temporal: false,
             complexity: crate::domain::QueryComplexity::Simple,
             strategy: RetrievalStrategy::Hybrid,
+            level: crate::domain::AnalysisLevel::Level1,
+            is_local: true,
+            bypass_reason: None,
         };
         
         // 1. Broad query "Explain monitoring" -> should route to BroadTopic

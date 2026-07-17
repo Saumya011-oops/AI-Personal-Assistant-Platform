@@ -81,11 +81,14 @@ async fn test_strategy(
         temporal: matches!(strategy, RetrievalStrategy::Contextual),
         complexity: if matches!(strategy, RetrievalStrategy::Recursive) { QueryComplexity::Complex } else { QueryComplexity::Simple },
         strategy: strategy.clone(),
+        level: assistant_core::domain::AnalysisLevel::Level1,
+        is_local: true,
+        bypass_reason: None,
     };
 
     let start_time = std::time::Instant::now();
     let results = retrieval_service
-        .retrieve_with_strategy(database, query, &strategy, &analysis, 0)
+        .retrieve_with_strategy(database, query, &strategy, &analysis, 0, assistant_core::domain::RetrievalMode::Evaluation)
         .await?;
     let duration = start_time.elapsed();
 

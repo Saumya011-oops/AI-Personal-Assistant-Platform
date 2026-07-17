@@ -121,7 +121,7 @@ pub async fn update_memory(
 pub async fn clear_all_memories(
     state: State<'_, AppState>,
 ) -> Result<CommandEnvelope<()>, String> {
-    match state.memory_service.clear_all_memories() {
+    match state.memory_service.clear_all_memories().await {
         Ok(_) => Ok(CommandEnvelope::success(())),
         Err(e) => Ok(CommandEnvelope::error("CLEAR_ALL_MEMORIES_FAILED", e.to_string())),
     }
@@ -155,7 +155,7 @@ pub async fn reset_assistant_data(
     match state.database.reset_assistant_data() {
         Ok(_) => {
             // Also clear the Qdrant memory collection
-            let _ = state.memory_service.clear_all_memories();
+            let _ = state.memory_service.clear_all_memories().await;
             // Clear document vector collections as well
             let _ = state.pipeline_service.qdrant_service().clear_collection().await;
             let _ = state.retrieval_service.clear_sparse_index().await;

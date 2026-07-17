@@ -183,7 +183,7 @@ impl Executor {
                     pre_rerank_chunks,
                     post_rerank_chunks,
                     recalled_memories,
-                    prompt_assembled: String::new(), // retrieval service assembles internally
+                    prompt_assembled: response.assembled_prompt.clone().unwrap_or_default(),
                     llm_response: response.answer.clone(),
                     citations: response.citations.clone(),
                     final_answer: response.answer.clone(),

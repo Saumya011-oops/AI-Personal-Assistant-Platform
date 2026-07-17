@@ -79,10 +79,10 @@ impl MemoryExtractor {
             return Ok(());
         }
 
-        // 1. Generate query embedding for user message to retrieve existing similar memories
+        let query_prefixed = format!("search_query: {}", user_message);
         let query_embeddings = self
             .ollama_service
-            .generate_embeddings(&[user_message.to_string()])
+            .generate_embeddings(&[query_prefixed])
             .await?;
         
         let Some(query_vector) = query_embeddings.into_iter().next() else {
@@ -193,8 +193,8 @@ DO NOT include any markdown code fence surrounding the JSON. Output only the pur
 
                     self.db.save_memory(&db_mem)?;
 
-                    // Generate embedding and upsert to Qdrant
-                    if let Ok(embeddings) = self.ollama_service.generate_embeddings(&[item.content.clone()]).await {
+                    let content_prefixed = format!("search_document: {}", item.content);
+                    if let Ok(embeddings) = self.ollama_service.generate_embeddings(&[content_prefixed]).await {
                         if let Some(vector) = embeddings.into_iter().next() {
                             let _ = self.qdrant.upsert_memory(&new_id, vector, &item.r#type, &item.content, item.importance).await;
                         }
@@ -212,8 +212,8 @@ DO NOT include any markdown code fence surrounding the JSON. Output only the pur
 
                             self.db.save_memory(&existing_mem)?;
 
-                            // Re-generate embedding and upsert to Qdrant
-                            if let Ok(embeddings) = self.ollama_service.generate_embeddings(&[item.content.clone()]).await {
+                            let content_prefixed = format!("search_document: {}", item.content);
+                            if let Ok(embeddings) = self.ollama_service.generate_embeddings(&[content_prefixed]).await {
                                 if let Some(vector) = embeddings.into_iter().next() {
                                     let _ = self.qdrant.upsert_memory(target_id, vector, &item.r#type, &item.content, item.importance).await;
                                 }

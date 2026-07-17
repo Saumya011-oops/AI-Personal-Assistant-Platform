@@ -199,28 +199,35 @@ impl QdrantService {
         Ok(false)
     }
 
-    /// Deletes and recreates the Qdrant collection to clear all vectors.
+    /// Clears all points/vectors from the Qdrant collection by deleting with an empty filter.
     pub async fn clear_collection(&self) -> Result<()> {
         let url = format!(
-            "{}/collections/{}",
+            "{}/collections/{}/points/delete",
             self.base_url.trim_end_matches('/'),
             self.collection_name
         );
 
-        let delete_response = self.client.delete(&url).send().await?;
-        if delete_response.status().is_success() || delete_response.status().as_u16() == 404 {
-            tracing::info!("Successfully deleted Qdrant collection '{}'", self.collection_name);
-            // Re-initialize it
-            self.initialize_collection().await?;
-            Ok(())
-        } else {
-            let error_text = delete_response.text().await.unwrap_or_default();
-            Err(anyhow!(
-                "Failed to delete Qdrant collection '{}': {}",
+        let payload = json!({
+            "filter": {}
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Failed to clear Qdrant collection '{}': {}",
                 self.collection_name,
                 error_text
-            ))
+            ));
         }
+
+        Ok(())
     }
 
     /// Deletes specific points from the Qdrant collection.

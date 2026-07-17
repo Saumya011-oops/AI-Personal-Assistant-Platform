@@ -275,6 +275,22 @@ pub enum RetrievalStrategy {
     Recursive,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RetrievalMode {
+    Production,
+    Evaluation,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AnalysisLevel {
+    Level0,
+    Level1,
+    Level2,
+    Level3,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryAnalysis {
@@ -284,6 +300,9 @@ pub struct QueryAnalysis {
     pub temporal: bool,
     pub complexity: QueryComplexity,
     pub strategy: RetrievalStrategy,
+    pub level: AnalysisLevel,
+    pub is_local: bool,
+    pub bypass_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +359,10 @@ pub struct AssistantResponse {
     pub diagnostics: Option<DiagnosticsPayload>,
     pub conversation_id: Option<String>,
     pub memories: Option<Vec<Value>>,
+    /// The fully assembled user-facing prompt sent to the LLM.
+    /// Populated by the retrieval service during ask_assistant.
+    /// Used by the evaluation framework to validate prompt assembly.
+    pub assembled_prompt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +437,11 @@ pub struct RetrievedChunk {
     pub content: String,
     pub score: f32,
     pub retrieval_score: Option<f32>,
+    pub dense_score: Option<f32>,
+    pub sparse_score: Option<f32>,
+    pub fused_score: Option<f32>,
+    pub reranker_score: Option<f32>,
+    pub final_score: Option<f32>,
     pub ordinal: i64,
     pub path_or_url: Option<String>,
     pub tags: Vec<String>,

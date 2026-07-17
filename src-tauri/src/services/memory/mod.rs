@@ -47,7 +47,9 @@ impl MemoryService {
             queue,
         }
     }
-
+    pub fn qdrant(&self) -> &Arc<MemoryQdrant> {
+        &self.qdrant
+    }
     /// Initializes Qdrant collections.
     pub async fn initialize(&self) -> Result<()> {
         let _ = self.qdrant.initialize().await;
@@ -206,10 +208,42 @@ impl MemoryService {
         limit: usize,
     ) -> Result<Vec<RankedMemory>> {
         // Generate embedding for query
-        let query_embeddings = self
+        let query_prefixed = format!("search_query: {}", query);
+        let query_embeddings = match self
             .ollama_service
-            .generate_embeddings(&[query.to_string()])
-            .await?;
+            .generate_embeddings(&[query_prefixed])
+            .await {
+                Ok(embeddings) => embeddings,
+                Err(e) => {
+                    tracing::warn!("Ollama embeddings failed, falling back to database keyword-based memory retrieval: {:?}", e);
+                    // FALLBACK: Query DB directly for memories matching keywords
+                    let keywords: Vec<String> = query.split_whitespace()
+                        .map(|s| s.to_lowercase().replace(&['?', '!', '.', ',', '"', '\''][..], ""))
+                        .filter(|s| s.len() > 2)
+                        .collect();
+                    if keywords.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    let all_memories = self.db.list_memories()?;
+                    let mut matched = Vec::new();
+                    for mem in all_memories {
+                        if mem.status != "active" { continue; }
+                        let mut score = 0.0;
+                        let content_lower = mem.content.to_lowercase();
+                        for kw in &keywords {
+                            if content_lower.contains(kw) {
+                                score += 0.3;
+                            }
+                        }
+                        if score > 0.0 {
+                            matched.push((mem, score as f32));
+                        }
+                    }
+                    let mut ranked = ranking::rank_memories(matched);
+                    ranked.truncate(limit);
+                    return Ok(ranked);
+                }
+            };
         
         let Some(query_vector) = query_embeddings.into_iter().next() else {
             return Ok(Vec::new());
@@ -231,11 +265,31 @@ impl MemoryService {
         let similar_ids: Vec<String> = similar_points.iter().map(|(id, _)| id.clone()).collect();
         let db_memories = self.db.list_memories_by_ids(&similar_ids)?;
 
-        // Match with their similarity score
         let mut candidates = Vec::new();
         for mem in db_memories {
             if let Some(pos) = similar_ids.iter().position(|id| *id == mem.id) {
-                let score = similar_points[pos].1;
+                let mut score = similar_points[pos].1;
+                
+                // Add token boundary exact match boost
+                let query_lower = query.to_lowercase();
+                let content_lower = mem.content.to_lowercase();
+                let mut is_match = false;
+                if let Some(idx) = query_lower.find(&content_lower) {
+                    let char_before = if idx > 0 { query_lower.chars().nth(idx - 1) } else { None };
+                    let char_after = query_lower.chars().nth(idx + content_lower.len());
+                    
+                    let before_boundary = char_before.map_or(true, |c| !c.is_alphanumeric());
+                    let after_boundary = char_after.map_or(true, |c| !c.is_alphanumeric());
+                    
+                    if before_boundary && after_boundary {
+                        is_match = true;
+                    }
+                }
+                
+                if is_match {
+                    score += 0.15;
+                }
+                
                 candidates.push((mem, score));
             }
         }
@@ -271,6 +325,21 @@ impl MemoryService {
         })
     }
 
+    pub async fn extract_memories_synchronously(
+        &self,
+        conversation_id: &str,
+        user_message: &str,
+        assistant_response: &str,
+    ) -> Result<()> {
+        let extractor = self::extraction::MemoryExtractor::new(
+            self.db.clone(),
+            self.ollama_service.clone(),
+            self.groq_service.clone(),
+            self.qdrant.clone(),
+        );
+        extractor.extract_and_consolidate(conversation_id, user_message, assistant_response).await
+    }
+
     // --- MEMORIES CRUD ---
 
     pub fn list_memories(&self) -> Result<Vec<DbMemory>> {
@@ -302,7 +371,8 @@ impl MemoryService {
             let type_str = mem.r#type.clone();
             
             tokio::spawn(async move {
-                if let Ok(embeddings) = ollama_clone.generate_embeddings(&[content_str.clone()]).await {
+                let content_prefixed = format!("search_document: {}", content_str);
+                if let Ok(embeddings) = ollama_clone.generate_embeddings(&[content_prefixed]).await {
                     if let Some(vector) = embeddings.into_iter().next() {
                         let _ = qdrant_clone.upsert_memory(&id_str, vector, &type_str, &content_str, importance).await;
                     }
@@ -312,12 +382,9 @@ impl MemoryService {
         Ok(())
     }
 
-    pub fn clear_all_memories(&self) -> Result<()> {
+    pub async fn clear_all_memories(&self) -> Result<()> {
         self.db.clear_all_memories()?;
-        let qdrant_clone = self.qdrant.clone();
-        tokio::spawn(async move {
-            let _ = qdrant_clone.clear_collection().await;
-        });
+        self.qdrant.clear_collection().await?;
         Ok(())
     }
 
@@ -341,7 +408,8 @@ impl MemoryService {
             let importance = mem.importance;
 
             tokio::spawn(async move {
-                if let Ok(embeddings) = ollama_clone.generate_embeddings(&[content_str.clone()]).await {
+                let content_prefixed = format!("search_document: {}", content_str);
+                if let Ok(embeddings) = ollama_clone.generate_embeddings(&[content_prefixed]).await {
                     if let Some(vector) = embeddings.into_iter().next() {
                         let _ = qdrant_clone.upsert_memory(&id_str, vector, &type_str, &content_str, importance).await;
                     }
