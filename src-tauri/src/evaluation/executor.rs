@@ -59,12 +59,8 @@ impl Executor {
 
     /// Ensure the evaluation conversation row exists.
     pub fn ensure_eval_conversation(&self) -> Result<()> {
-        let conn = self.database.get_connection();
-        let conn = conn.lock().expect("db lock poisoned");
-        conn.execute(
-            "INSERT OR IGNORE INTO chats (id, title) VALUES (?1, ?2)",
-            rusqlite::params![&self.eval_conversation_id, "QA Evaluation Session"],
-        )?;
+        // No-op: each test now creates its own fresh conversation in run().
+        // Keeping this method so callers don't need to change.
         Ok(())
     }
 
@@ -87,6 +83,18 @@ impl Executor {
         };
 
         // ── 2. Execute the query through the full pipeline ────────────────────
+        // Each test uses its own isolated conversation so that history from
+        // prior tests never accumulates into the prompt (prevents 413/TPM errors).
+        let conv_id = format!("eval-{}", test.id);
+        {
+            let conn = self.database.get_connection();
+            let conn = conn.lock().expect("db lock poisoned");
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO chats (id, title) VALUES (?1, ?2)",
+                rusqlite::params![&conv_id, format!("QA Eval: {}", test.id)],
+            );
+        }
+
         let pipeline_start = Instant::now();
         let response_result = self
             .retrieval_service
@@ -94,12 +102,20 @@ impl Executor {
                 &self.database,
                 &self.memory_service,
                 &test.query,
-                &self.eval_conversation_id,
+                &conv_id,
                 &self.intent_router,
                 RetrievalMode::Evaluation,
             )
             .await;
         latency.total_ms = pipeline_start.elapsed().as_millis() as u64;
+
+        // Clean up the per-test conversation to avoid polluting the chat list.
+        {
+            let conn = self.database.get_connection();
+            let conn = conn.lock().expect("db lock poisoned");
+            let _ = conn.execute("DELETE FROM messages WHERE conversation_id = ?1", rusqlite::params![&conv_id]);
+            let _ = conn.execute("DELETE FROM chats WHERE id = ?1", rusqlite::params![&conv_id]);
+        }
 
         // ── 3. Build the trace ────────────────────────────────────────────────
         let trace = match response_result {
