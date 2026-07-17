@@ -2724,12 +2724,13 @@ impl RetrievalService {
                      \n\
                      STRICT CONSTRAINTS:\n\
                      1. Your response MUST be between 2 and 4 sentences long. Do not exceed 4 sentences.\n\
-                     2. Use only the supplied context. Do not assume or extrapolate.\n\
-                     3. Do NOT include any citations, sources, files, scores, percentages, or chunk IDs in the text of your answer.\n\
-                     4. Do NOT append a 'Sources:' or 'Citations:' list or metadata block. Output ONLY the clean answer text.\n\
-                     5. Keep the answer extremely grounded and direct.\n\
-                     6. To ensure accuracy, preserve key technical terms (like 'monitoring', 'authentication', etc.) from the context rather than rephrasing them. For example, if the context is about Prometheus or Grafana, you MUST use the term 'monitoring' in your response.\n\
-                     7. Do NOT mention any unrelated components, SaaS tools, platforms, or integrations (such as Notion, Obsidian, Jira, Slack, etc.) unless they are directly and centrally the subject of the user query."
+                     2. Use ONLY the supplied context. Do NOT assume, extrapolate, or add any implementation details, technical specifics, or mechanisms not explicitly stated in the context.\n\
+                     3. If the context does not contain the information needed to answer fully, say what you do know from the context and stop. Do not fill gaps with general knowledge.\n\
+                     4. Do NOT include any citations, sources, files, scores, percentages, or chunk IDs in the text of your answer.\n\
+                     5. Do NOT append a 'Sources:' or 'Citations:' list or metadata block. Output ONLY the clean answer text.\n\
+                     6. Keep the answer extremely grounded and direct.\n\
+                     7. To ensure accuracy, preserve key technical terms (like 'monitoring', 'authentication', etc.) from the context rather than rephrasing them. For example, if the context is about Prometheus or Grafana, you MUST use the term 'monitoring' in your response.\n\
+                     8. Do NOT mention any unrelated components, SaaS tools, platforms, or integrations (such as Notion, Obsidian, Jira, Slack, etc.) unless they are directly and centrally the subject of the user query."
                 )
             }
             QueryIntentType::BroadTopic => {
@@ -2739,7 +2740,7 @@ impl RetrievalService {
                      STRICT CONSTRAINTS:\n\
                      1. Your response MUST be between 4 and 8 sentences long.\n\
                      2. Use headers (##) or structured paragraphs to present the information.\n\
-                     3. Use only the supplied context. Do not assume, extrapolate, or invent sections/categories not present in the context.\n\
+                     3. Use ONLY the supplied context. Do NOT assume, extrapolate, or invent sections/categories not present in the context. Do NOT add implementation details not explicitly stated.\n\
                      4. If the context only supports a few concepts, describe only those concepts. Do not force standard structures like Architecture/Benefits unless supported by evidence.\n\
                      5. Do NOT include any citations, sources, files, scores, percentages, or chunk IDs in the text of your answer.\n\
                      6. Do NOT append a 'Sources:' or 'Citations:' list or metadata block. Output ONLY the clean answer text.\n\
@@ -2754,7 +2755,7 @@ impl RetrievalService {
                      STRICT CONSTRAINTS:\n\
                      1. Your response MUST be between 5 and 10 sentences long.\n\
                      2. Focus on relationship-focused explanations (connections, integration, dependencies).\n\
-                     3. Use only the supplied context. Do not assume, extrapolate, or synthesize concepts not present in the context.\n\
+                     3. Use ONLY the supplied context. Do NOT assume, extrapolate, or synthesize concepts not present in the context. Do NOT add implementation details or technical mechanisms not explicitly stated.\n\
                      4. Do NOT include any citations, sources, files, scores, percentages, or chunk IDs in the text of your answer.\n\
                      5. Do NOT append a 'Sources:' or 'Citations:' list or metadata block. Output ONLY the clean answer text.\n\
                      6. To ensure accuracy, preserve key technical terms (like 'monitoring', 'authentication', etc.) from the context rather than rephrasing them.\n\
@@ -2768,7 +2769,7 @@ impl RetrievalService {
                      STRICT CONSTRAINTS:\n\
                      1. Your response MUST be between 5 and 10 sentences long.\n\
                      2. Focus on comparing the target entities clearly and neutrally.\n\
-                     3. Use only the supplied context. Do not assume, extrapolate, or synthesize concepts not present in the context.\n\
+                     3. Use ONLY the supplied context. Do NOT assume, extrapolate, or synthesize concepts not present in the context. Do NOT add implementation details not explicitly stated.\n\
                      4. Do NOT include any citations, sources, files, scores, percentages, or chunk IDs in the text of your answer.\n\
                      5. Do NOT append a 'Sources:' or 'Citations:' list or metadata block. Output ONLY the clean answer text.\n\
                      6. To ensure accuracy, preserve key technical terms (like 'monitoring', 'authentication', etc.) from the context rather than rephrasing them.\n\

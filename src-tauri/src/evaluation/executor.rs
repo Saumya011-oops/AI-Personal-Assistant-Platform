@@ -22,6 +22,7 @@ use crate::db::Database;
 use crate::domain::RetrievalMode;
 use crate::services::intent_router::IntentRouter;
 use crate::services::memory::{DbMemory, MemoryService};
+use crate::services::ollama::OllamaService;
 use crate::services::retrieval::RetrievalService;
 
 use super::types::*;
@@ -34,6 +35,7 @@ pub struct Executor {
     database: Database,
     retrieval_service: Arc<RetrievalService>,
     memory_service: Arc<MemoryService>,
+    ollama_service: Arc<OllamaService>,
     intent_router: IntentRouter,
     eval_conversation_id: String,
 }
@@ -43,11 +45,13 @@ impl Executor {
         database: Database,
         retrieval_service: Arc<RetrievalService>,
         memory_service: Arc<MemoryService>,
+        ollama_service: Arc<OllamaService>,
     ) -> Self {
         Self {
             database,
             retrieval_service,
             memory_service,
+            ollama_service,
             intent_router: IntentRouter::new(),
             eval_conversation_id: "qa-eval-session".to_string(),
         }
@@ -287,15 +291,22 @@ impl Executor {
                 )?;
             }
 
-            // Also upsert vector to Qdrant for semantic retrieval
-            // (done best-effort; if Qdrant is down, DB-only fallback still works)
+            // Compute real embedding via Ollama for accurate vector recall
+            let embedding = self
+                .ollama_service
+                .generate_embeddings(&[fixture.content.clone()])
+                .await
+                .ok()
+                .and_then(|mut v| v.pop())
+                .unwrap_or_else(|| vec![0.0f32; 768]);
+
+            // Upsert real embedding to Qdrant for semantic retrieval
             let _ = self
                 .memory_service
                 .qdrant()
                 .upsert_memory(
                     &fixture.id,
-                    // Use zero vector as placeholder if embedding fails
-                    vec![0.0f32; 768],
+                    embedding,
                     &fixture.memory_type,
                     &fixture.content,
                     fixture.importance,

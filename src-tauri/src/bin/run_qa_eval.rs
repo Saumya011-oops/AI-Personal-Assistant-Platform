@@ -128,10 +128,10 @@ async fn main() -> Result<()> {
     // ── Initialize services ───────────────────────────────────────────────────
     info!("Initializing services...");
 
-    let ollama_service = OllamaService::new(
+    let ollama_service = Arc::new(OllamaService::new(
         config.ollama_url.clone(),
         config.embedding_model.clone(),
-    );
+    ));
     let qdrant_service = QdrantService::new(
         config.qdrant_url.clone(),
         config.qdrant_collection.clone(),
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
     let context_builder = ContextBuilder::new();
 
     let retrieval_service = Arc::new(RetrievalService::new(
-        ollama_service.clone(),
+        (*ollama_service).clone(),
         qdrant_service,
         sparse_service,
         groq_service.clone(),
@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
 
     let memory_service = Arc::new(MemoryService::new(
         database.clone(),
-        ollama_service.clone(),
+        (*ollama_service).clone(),
         groq_service.clone(),
         &config.qdrant_url,
     ));
@@ -197,10 +197,11 @@ async fn main() -> Result<()> {
         database.clone(),
         retrieval_service,
         memory_service,
+        ollama_service.clone(),
     );
     executor.ensure_eval_conversation()?;
 
-    let evaluator = Evaluator::new(ollama_service, groq_service);
+    let evaluator = Evaluator::new((*ollama_service).clone(), groq_service);
     let regression_runner = RegressionRunner::new(&reports_dir);
     let reporter = Reporter::new(&reports_dir);
 

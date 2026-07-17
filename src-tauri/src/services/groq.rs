@@ -7,6 +7,12 @@ use std::sync::Arc;
 use crate::db::Database;
 use super::CredentialService;
 
+/// Maximum number of retries when Groq returns 429 Too Many Requests.
+const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+
+/// Default backoff (seconds) if we cannot parse retry-after from error body.
+const DEFAULT_BACKOFF_SECS: u64 = 22;
+
 #[derive(Clone)]
 pub struct GroqService {
     api_key: Option<String>,
@@ -100,7 +106,6 @@ impl GroqService {
             return Err(anyhow!("GROQ_API_KEY is not configured"));
         };
 
-
         let models = [&self.primary_model, &self.fallback_model];
         let mut last_error = None;
 
@@ -125,32 +130,59 @@ impl GroqService {
                 }
             });
 
-            let response = self
-                .client
-                .post(format!(
-                    "{}/chat/completions",
-                    self.base_url.trim_end_matches('/')
-                ))
-                .bearer_auth(&api_key)
-                .json(&payload)
-                .send()
-                .await;
+            // Retry loop for 429 rate-limit responses
+            let mut attempt = 0u32;
+            loop {
+                let response = self
+                    .client
+                    .post(format!(
+                        "{}/chat/completions",
+                        self.base_url.trim_end_matches('/')
+                    ))
+                    .bearer_auth(&api_key)
+                    .json(&payload)
+                    .send()
+                    .await;
 
-            match response {
-                Ok(response) if response.status().is_success() => {
-                    let body: ChatCompletionResponse = response.json().await?;
-                    if let Some(choice) = body.choices.into_iter().next() {
-                        return Ok(choice.message.content);
+                match response {
+                    Ok(resp) if resp.status().is_success() => {
+                        let body: ChatCompletionResponse = resp.json().await?;
+                        if let Some(choice) = body.choices.into_iter().next() {
+                            return Ok(choice.message.content);
+                        }
+                        last_error = Some(anyhow!("groq returned no choices"));
+                        break;
                     }
-                    last_error = Some(anyhow!("groq returned no choices"));
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    last_error = Some(anyhow!("groq request failed with status {status}: {body}"));
-                }
-                Err(error) => {
-                    last_error = Some(error.into());
+                    Ok(resp) if resp.status().as_u16() == 429
+                        && attempt < MAX_RATE_LIMIT_RETRIES =>
+                    {
+                        let body = resp.text().await.unwrap_or_default();
+                        // Parse "Please try again in Xs" from Groq error message
+                        let wait_secs = parse_retry_after_secs(&body)
+                            .unwrap_or(DEFAULT_BACKOFF_SECS);
+                        tracing::warn!(
+                            "[GROQ_RATE_LIMIT] 429 model={} attempt={}/{} — waiting {}s. body={}",
+                            model,
+                            attempt + 1,
+                            MAX_RATE_LIMIT_RETRIES,
+                            wait_secs,
+                            &body[..body.len().min(160)],
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                        attempt += 1;
+                        // continue inner retry loop
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        last_error =
+                            Some(anyhow!("groq request failed with status {status}: {body}"));
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error.into());
+                        break;
+                    }
                 }
             }
         }
@@ -163,4 +195,18 @@ impl GroqService {
         let end = text.rfind('}').ok_or_else(|| anyhow!("missing json object end"))?;
         serde_json::from_str(&text[start..=end]).context("failed to parse extracted json")
     }
+}
+
+/// Parses the retry-after duration from a Groq 429 error body.
+///
+/// Groq error messages contain text like:
+///   "Please try again in 16.099999999s."
+/// We extract the seconds, round up, and add 1s buffer.
+fn parse_retry_after_secs(body: &str) -> Option<u64> {
+    let marker = "try again in ";
+    let start = body.find(marker)? + marker.len();
+    let rest = &body[start..];
+    let end = rest.find('s')?;
+    let secs: f64 = rest[..end].trim().parse().ok()?;
+    Some(secs.ceil() as u64 + 1)
 }

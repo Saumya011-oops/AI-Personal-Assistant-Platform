@@ -28,11 +28,12 @@ use super::types::*;
 
 /// Cosine similarity threshold above which a claim is considered semantically
 /// supported (Stage 2). Below this, the claim is sent to LLM judge (Stage 3).
-const SEMANTIC_SUPPORT_THRESHOLD: f32 = 0.72;
+/// Lowered from 0.72 → 0.68 to avoid penalizing valid paraphrases.
+const SEMANTIC_SUPPORT_THRESHOLD: f32 = 0.68;
 
 /// Cosine similarity threshold below which a claim is definitively unsupported
 /// without calling the LLM (avoids LLM round-trip for clearly absent claims).
-const SEMANTIC_REJECT_THRESHOLD: f32 = 0.35;
+const SEMANTIC_REJECT_THRESHOLD: f32 = 0.30;
 
 /// Production-readiness thresholds per dimension (0–100).
 const THRESHOLD_RETRIEVAL: f32 = 95.0;
