@@ -170,7 +170,6 @@ impl GroqService {
                         );
                         tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
                         attempt += 1;
-                        // continue inner retry loop
                     }
                     Ok(resp) => {
                         let status = resp.status();
@@ -178,6 +177,16 @@ impl GroqService {
                         last_error =
                             Some(anyhow!("groq request failed with status {status}: {body}"));
                         break;
+                    }
+                    Err(e) if attempt < MAX_RATE_LIMIT_RETRIES => {
+                        // Network-level error (connection refused, timeout, DNS).
+                        // Retry with a short backoff — these are usually transient.
+                        tracing::warn!(
+                            "[GROQ_NET_ERROR] model={} attempt={}/{} — retrying in 3s. err={:?}",
+                            model, attempt + 1, MAX_RATE_LIMIT_RETRIES, e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        attempt += 1;
                     }
                     Err(error) => {
                         last_error = Some(error.into());
