@@ -248,6 +248,10 @@ async fn main() -> Result<()> {
         let trace = executor.run(test).await;
         let exec_error = trace.error.clone();
 
+        // 2-second inter-test pace — spreads Groq token usage across time to
+        // reduce 429 cascades (6000 TPM limit on llama-3.3-70b-versatile).
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
         // Evaluate the trace
         let eval_result = evaluator.evaluate(test, &trace).await;
 

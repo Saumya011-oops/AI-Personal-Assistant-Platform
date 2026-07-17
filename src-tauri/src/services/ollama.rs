@@ -124,6 +124,7 @@ impl OllamaService {
             .client
             .post(&url)
             .json(&payload)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await?;
 
