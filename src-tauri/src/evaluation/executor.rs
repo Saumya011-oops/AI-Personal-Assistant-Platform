@@ -291,10 +291,14 @@ impl Executor {
                 )?;
             }
 
-            // Compute real embedding via Ollama for accurate vector recall
+            // Compute real embedding via Ollama for accurate vector recall.
+            // Must use the 'search_document:' prefix to match how the memory
+            // retrieval query uses 'search_query:' — nomic-embed-text is
+            // asymmetric and the prefix pair must be consistent.
+            let prefixed_content = format!("search_document: {}", fixture.content);
             let embedding = self
                 .ollama_service
-                .generate_embeddings(&[fixture.content.clone()])
+                .generate_embeddings(&[prefixed_content])
                 .await
                 .ok()
                 .and_then(|mut v| v.pop())

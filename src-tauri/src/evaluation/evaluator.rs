@@ -421,10 +421,15 @@ impl Evaluator {
                 details.push("Prompt section ordering is correct".to_string());
             }
 
-            // 3b. Duplicate context blocks
+            // 3b. Duplicate context blocks — count the canonical '### SectionName'
+            // headers only, not arbitrary occurrences of the name inside content
+            // (e.g., a LLM-generated summary may itself contain 'Conversation Summary:')
             let sections_found: Vec<&str> = PROMPT_SECTION_ORDER
                 .iter()
-                .filter(|s| prompt.matches(**s).count() > 1)
+                .filter(|s| {
+                    let header = format!("### {}", s);
+                    prompt.matches(header.as_str()).count() > 1
+                })
                 .copied()
                 .collect();
             if !sections_found.is_empty() {
@@ -780,7 +785,7 @@ impl Evaluator {
             claim, evidence_context
         );
 
-        match self.groq.chat_json(system_prompt, &user_prompt).await {
+        match self.ollama.chat_json(system_prompt, &user_prompt).await {
             Ok(json) => {
                 let verdict_str = json["verdict"].as_str().unwrap_or("UNSUPPORTED");
                 let explanation = json["explanation"].as_str().unwrap_or("").to_string();
